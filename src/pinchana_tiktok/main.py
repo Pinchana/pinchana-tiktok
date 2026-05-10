@@ -4,12 +4,14 @@ import asyncio
 import os
 import re
 import logging
+from pathlib import Path
 from fastapi import FastAPI, APIRouter, HTTPException
 from pinchana_core.models import ScrapeRequest, ScrapeResponse, MediaItem
 from pinchana_core.storage import MediaStorage
 from pinchana_core.plugins import ScraperPlugin, registry
 from pinchana_core.vpn import GluetunController, VpnRotationError
 from .api import TikTokScraper
+from yt_dlp import YoutubeDL
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -67,6 +69,50 @@ def _cached_media_ready(metadata: dict) -> bool:
     return True
 
 
+def _build_ydl(
+    outtmpl: dict | str,
+    *,
+    fmt: str | None = None,
+    write_thumbnail: bool = False,
+    skip_download: bool = False,
+    noplaylist: bool = False,
+) -> YoutubeDL:
+    opts: dict = {
+        "quiet": True,
+        "no_warnings": True,
+        "outtmpl": outtmpl,
+        "noplaylist": noplaylist,
+        "overwrites": True,
+        "retries": 2,
+        "fragment_retries": 2,
+    }
+    if fmt:
+        opts["format"] = fmt
+    if write_thumbnail:
+        opts["writethumbnail"] = True
+    if skip_download:
+        opts["skip_download"] = True
+    return YoutubeDL(opts)
+
+
+def _find_downloaded_file(base_dir: Path, prefix: str) -> Path | None:
+    matches = sorted(p for p in base_dir.glob(f"{prefix}.*") if p.is_file())
+    return matches[0] if matches else None
+
+
+def _replace_file(src: Path, dest: Path) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        dest.unlink()
+    src.replace(dest)
+    return dest
+
+
+def _download_with_ydl(ydl: YoutubeDL, info: dict) -> dict:
+    result = ydl.process_ie_result(info, download=True)
+    return ydl.sanitize_info(result)
+
+
 class RateLimitError(Exception):
     """Raised when TikTok blocks the request (403/429/IP ban)."""
     pass
@@ -110,6 +156,10 @@ def extract_video_id(url: str) -> str:
 async def _download_and_build_response(video_id: str, info: dict) -> ScrapeResponse:
     storage.prepare_post_dir(video_id)
 
+    post_dir = storage._post_dir(video_id)
+    carousel_dir = post_dir / "carousel"
+    carousel_dir.mkdir(parents=True, exist_ok=True)
+
     title = info.get("title") or info.get("description") or video_id
     author = info.get("uploader") or info.get("channel") or ""
     media_type = info.get("_type", "video")
@@ -120,66 +170,115 @@ async def _download_and_build_response(video_id: str, info: dict) -> ScrapeRespo
     audio_url = None
 
     if media_type == "playlist":
-        entries = info.get("entries", [])
-        image_entries = [e for e in entries if e.get("ext") == "jpg"]
-        audio_entries = [e for e in entries if e.get("formats") and e["formats"][0].get("vcodec") == "none"]
+        download_error = False
+        image_dir = post_dir / "images"
+        image_dir.mkdir(parents=True, exist_ok=True)
 
-        tasks = []
-        for idx, img in enumerate(image_entries):
-            dest = storage.carousel_thumbnail_path(video_id, idx)
-            tasks.append(storage.download(img["url"], dest))
+        for old in image_dir.glob("*"):
+            if old.is_file():
+                old.unlink()
 
-        for aud in audio_entries:
-            fmt = aud["formats"][0]
-            ext = fmt.get("ext", "mp3")
-            dest = storage._post_dir(video_id) / f"audio.{ext}"
-            tasks.append(storage.download(fmt["url"], dest))
-            audio_url = f"/media/tiktok/{video_id}/audio.{ext}"
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for r in results:
-            if isinstance(r, Exception):
-                logger.error(f"Download error: {r}")
-
-        for idx, img in enumerate(image_entries):
-            carousel_items.append(MediaItem(
-                index=idx,
-                media_type="image",
-                thumbnail_url=f"/media/tiktok/{video_id}/carousel/{idx}_thumbnail.jpg",
-                video_url=None,
-            ))
+        entries = info.get("entries") or []
+        image_entries = [
+            entry for entry in entries
+            if entry and entry.get("url") and entry.get("ext") and not entry.get("formats")
+            and entry.get("ext") not in ("m4a", "mp3", "aac")
+        ]
+        audio_entry = next(
+            (
+                entry for entry in entries
+                if entry and entry.get("formats")
+                and (entry.get("vcodec") or entry["formats"][0].get("vcodec")) == "none"
+            ),
+            None,
+        )
 
         if image_entries:
-            thumbnail_url = f"/media/tiktok/{video_id}/carousel/0_thumbnail.jpg"
+            image_info = {**info, "entries": image_entries}
+            image_outtmpl = str(image_dir / "%(playlist_index)02d.%(ext)s")
+            image_ydl = _build_ydl(image_outtmpl)
+            try:
+                await asyncio.to_thread(_download_with_ydl, image_ydl, image_info)
+            except Exception as e:
+                download_error = True
+                logger.error("Image download failed: %s", e)
+
+            image_files = sorted(p for p in image_dir.glob("*.*") if p.is_file())
+            for idx, img_path in enumerate(image_files):
+                ext = img_path.suffix.lstrip(".") or "jpg"
+                dest = carousel_dir / f"{idx}_thumbnail.{ext}"
+                _replace_file(img_path, dest)
+                carousel_items.append(MediaItem(
+                    index=idx,
+                    media_type="image",
+                    thumbnail_url=f"/media/tiktok/{video_id}/carousel/{idx}_thumbnail.{ext}",
+                    video_url=None,
+                ))
+
+        if carousel_items:
+            thumbnail_url = carousel_items[0].thumbnail_url
+
+        audio_url = None
+        if audio_entry:
+            audio_outtmpl = str(post_dir / "audio.%(ext)s")
+            audio_ydl = _build_ydl(audio_outtmpl, fmt="bestaudio/best", noplaylist=True)
+            try:
+                await asyncio.to_thread(_download_with_ydl, audio_ydl, audio_entry)
+            except Exception as e:
+                download_error = True
+                logger.error("Audio download failed: %s", e)
+
+        audio_file = _find_downloaded_file(post_dir, "audio")
+        if audio_file:
+            audio_ext = audio_file.suffix.lstrip(".")
+            audio_url = f"/media/tiktok/{video_id}/audio.{audio_ext}"
+
         media_type = "carousel"
 
+        if download_error and not carousel_items and not audio_url:
+            raise HTTPException(status_code=503, detail="Media download failed")
+
     else:
-        formats = info.get("formats", [])
-        best_video = None
-        for fmt in formats:
-            if fmt.get("vcodec") != "none" and fmt.get("url"):
-                best_video = fmt
-                break
+        download_error = False
+        video_outtmpl = str(post_dir / "video.%(ext)s")
+        video_ydl = _build_ydl(video_outtmpl, fmt="best[ext=mp4]/best", noplaylist=True)
+        try:
+            await asyncio.to_thread(_download_with_ydl, video_ydl, info)
+        except Exception as e:
+            download_error = True
+            logger.error("Video download failed: %s", e)
 
-        thumbnails = info.get("thumbnails", [])
-        best_thumb = thumbnails[0]["url"] if thumbnails else None
+        thumb_outtmpl = {
+            "default": str(post_dir / "video.%(ext)s"),
+            "thumbnail": str(post_dir / "thumbnail.%(ext)s"),
+        }
+        thumb_ydl = _build_ydl(
+            thumb_outtmpl,
+            write_thumbnail=True,
+            skip_download=True,
+            fmt="best",
+            noplaylist=True,
+        )
+        try:
+            await asyncio.to_thread(_download_with_ydl, thumb_ydl, info)
+        except Exception as e:
+            download_error = True
+            logger.error("Thumbnail download failed: %s", e)
 
-        tasks = []
-        if best_thumb:
-            tasks.append(storage.download(best_thumb, storage.thumbnail_path(video_id)))
-        if best_video:
-            ext = best_video.get("ext", "mp4")
-            dest = storage._post_dir(video_id) / f"video.{ext}"
-            tasks.append(storage.download(best_video["url"], dest))
-            video_url = f"/media/tiktok/{video_id}/video.{ext}"
+        video_file = _find_downloaded_file(post_dir, "video")
+        if video_file:
+            video_ext = video_file.suffix.lstrip(".")
+            video_url = f"/media/tiktok/{video_id}/video.{video_ext}"
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for r in results:
-            if isinstance(r, Exception):
-                logger.error(f"Download error: {r}")
+        thumb_file = _find_downloaded_file(post_dir, "thumbnail")
+        if thumb_file:
+            thumb_ext = thumb_file.suffix.lstrip(".")
+            thumbnail_url = f"/media/tiktok/{video_id}/thumbnail.{thumb_ext}"
 
-        thumbnail_url = f"/media/tiktok/{video_id}/thumbnail.jpg" if best_thumb else ""
         media_type = "video"
+
+        if download_error and not video_url:
+            raise HTTPException(status_code=503, detail="Media download failed")
 
     response = ScrapeResponse(
         shortcode=video_id,
