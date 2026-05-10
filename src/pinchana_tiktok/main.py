@@ -23,6 +23,50 @@ storage = MediaStorage(
 )
 
 
+def _media_url_to_path(url: str | None):
+    if not url:
+        return None
+    url = str(url)
+    if not url.startswith("/media/"):
+        return None
+    path_part = url.split("?", 1)[0][len("/media/"):]
+    parts = path_part.split("/", 2)
+    if len(parts) < 3:
+        return None
+    platform, post_id, filename = parts[0], parts[1], parts[2]
+    if platform != "tiktok" or not post_id or not filename:
+        return None
+    return storage.base_path / post_id / filename
+
+
+def _cached_media_ready(metadata: dict) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+
+    urls: list[str] = []
+    for key in ("thumbnail_url", "video_url", "audio_url"):
+        url = metadata.get(key)
+        if url:
+            urls.append(url)
+
+    carousel = metadata.get("carousel") or []
+    if isinstance(carousel, list):
+        for item in carousel:
+            if not isinstance(item, dict):
+                continue
+            for key in ("thumbnail_url", "video_url"):
+                url = item.get(key)
+                if url:
+                    urls.append(url)
+
+    for url in urls:
+        path = _media_url_to_path(url)
+        if not path or not path.exists():
+            return False
+
+    return True
+
+
 class RateLimitError(Exception):
     """Raised when TikTok blocks the request (403/429/IP ban)."""
     pass
@@ -164,8 +208,11 @@ async def process_scrape_request(request: ScrapeRequest):
     video_id = extract_video_id(url)
 
     if storage.is_cached(video_id):
-        logger.info(f"Cache hit for {video_id}")
-        return ScrapeResponse(**storage.load_metadata(video_id))
+        cached = storage.load_metadata(video_id)
+        if cached and _cached_media_ready(cached):
+            logger.info("Cache hit for %s", video_id)
+            return ScrapeResponse(**cached)
+        logger.info("Cache invalid for %s, missing media; re-scraping", video_id)
 
     logger.info(f"Scraping TikTok: {video_id}")
     last_error = None
