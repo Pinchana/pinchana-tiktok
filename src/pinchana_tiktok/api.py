@@ -34,7 +34,19 @@ class TikTokScraper:
             with image entries.
         """
         ie = TikTokIE(self._ydl)
-        return ie.extract(url)
+        info = ie.extract(url)
+        # yt-dlp expects these fields when the info dict is later passed
+        # to a fresh YoutubeDL instance for downloading.
+        info.setdefault('extractor', ie.IE_NAME)
+        info.setdefault('extractor_key', ie.ie_key())
+        info.setdefault('webpage_url', url)
+        if info.get('_type') in ('playlist', 'multi_video'):
+            for entry in info.get('entries') or []:
+                if isinstance(entry, dict):
+                    entry.setdefault('extractor', ie.IE_NAME)
+                    entry.setdefault('extractor_key', ie.ie_key())
+                    entry.setdefault('webpage_url', entry.get('url') or url)
+        return info
 
     def extract_user(self, url: str) -> dict:
         """Extract a user's video list as a playlist.

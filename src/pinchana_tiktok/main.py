@@ -76,6 +76,7 @@ def _build_ydl(
     write_thumbnail: bool = False,
     skip_download: bool = False,
     noplaylist: bool = False,
+    cookies_from: YoutubeDL | None = None,
 ) -> YoutubeDL:
     opts: dict = {
         "quiet": True,
@@ -92,7 +93,11 @@ def _build_ydl(
         opts["writethumbnail"] = True
     if skip_download:
         opts["skip_download"] = True
-    return YoutubeDL(opts)
+    ydl = YoutubeDL(opts)
+    if cookies_from:
+        for cookie in cookies_from.cookiejar:
+            ydl.cookiejar.set_cookie(cookie)
+    return ydl
 
 
 def _find_downloaded_file(base_dir: Path, prefix: str) -> Path | None:
@@ -196,7 +201,7 @@ async def _download_and_build_response(video_id: str, info: dict) -> ScrapeRespo
         if image_entries:
             image_info = {**info, "entries": image_entries}
             image_outtmpl = str(image_dir / "%(playlist_index)02d.%(ext)s")
-            image_ydl = _build_ydl(image_outtmpl)
+            image_ydl = _build_ydl(image_outtmpl, cookies_from=scraper._ydl)
             try:
                 await asyncio.to_thread(_download_with_ydl, image_ydl, image_info)
             except Exception as e:
@@ -221,7 +226,7 @@ async def _download_and_build_response(video_id: str, info: dict) -> ScrapeRespo
         audio_url = None
         if audio_entry:
             audio_outtmpl = str(post_dir / "audio.%(ext)s")
-            audio_ydl = _build_ydl(audio_outtmpl, fmt="bestaudio/best", noplaylist=True)
+            audio_ydl = _build_ydl(audio_outtmpl, fmt="bestaudio/best", noplaylist=True, cookies_from=scraper._ydl)
             try:
                 await asyncio.to_thread(_download_with_ydl, audio_ydl, audio_entry)
             except Exception as e:
@@ -241,7 +246,7 @@ async def _download_and_build_response(video_id: str, info: dict) -> ScrapeRespo
     else:
         download_error = False
         video_outtmpl = str(post_dir / "video.%(ext)s")
-        video_ydl = _build_ydl(video_outtmpl, fmt="best[ext=mp4]/best", noplaylist=True)
+        video_ydl = _build_ydl(video_outtmpl, fmt="best[ext=mp4]/best", noplaylist=True, cookies_from=scraper._ydl)
         try:
             await asyncio.to_thread(_download_with_ydl, video_ydl, info)
         except Exception as e:
@@ -258,6 +263,7 @@ async def _download_and_build_response(video_id: str, info: dict) -> ScrapeRespo
             skip_download=True,
             fmt="best",
             noplaylist=True,
+            cookies_from=scraper._ydl,
         )
         try:
             await asyncio.to_thread(_download_with_ydl, thumb_ydl, info)
@@ -336,6 +342,8 @@ async def process_scrape_request(request: ScrapeRequest):
                 if attempt < 3:
                     await asyncio.sleep(5)
 
+    if isinstance(last_error, HTTPException):
+        raise last_error
     raise HTTPException(
         status_code=503 if _is_rate_limited(last_error) else 500,
         detail=str(last_error)
