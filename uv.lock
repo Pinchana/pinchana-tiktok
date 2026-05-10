@@ -154,6 +154,7 @@ dependencies = [
     { name = "httpx" },
     { name = "pinchana-core" },
     { name = "pydantic" },
+    { name = "tenacity" },
     { name = "uvicorn" },
     { name = "yt-dlp" },
 ]
@@ -164,6 +165,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "pinchana-core", directory = "../pinchana-core" },
     { name = "pydantic", specifier = ">=2.13.3" },
+    { name = "tenacity", specifier = ">=9.1.4" },
     { name = "uvicorn", specifier = ">=0.46.0" },
     { name = "yt-dlp", specifier = ">=2026.3.17" },
 ]

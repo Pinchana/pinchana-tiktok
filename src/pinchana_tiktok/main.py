@@ -8,6 +8,7 @@ from fastapi import FastAPI, APIRouter, HTTPException
 from pinchana_core.models import ScrapeRequest, ScrapeResponse, MediaItem
 from pinchana_core.storage import MediaStorage
 from pinchana_core.plugins import ScraperPlugin, registry
+from pinchana_core.vpn import GluetunController, VpnRotationError
 from .api import TikTokScraper
 
 logging.basicConfig(level=logging.INFO)
@@ -15,10 +16,44 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 scraper = TikTokScraper()
+gluetun = GluetunController()
 storage = MediaStorage(
     base_path=os.getenv("CACHE_PATH", "./cache"),
     max_size_gb=float(os.getenv("CACHE_MAX_SIZE_GB", "10.0")),
 )
+
+
+class RateLimitError(Exception):
+    """Raised when TikTok blocks the request (403/429/IP ban)."""
+    pass
+
+
+async def trigger_rotation():
+    """Trigger VPN IP rotation."""
+    logger.warning("Rotating VPN IP...")
+    try:
+        await gluetun.rotate_ip()
+    except VpnRotationError as e:
+        logger.warning(f"VPN rotation failed: {e}")
+        raise RateLimitError(str(e))
+
+
+def _is_rate_limited(e: Exception) -> bool:
+    """Check if an exception indicates rate-limiting or IP blocking."""
+    msg = str(e).lower()
+    return any(
+        x in msg
+        for x in (
+            "blocked",
+            "403",
+            "429",
+            "rate limit",
+            "too many requests",
+            "verify",
+            "captcha",
+            "unavailable",
+        )
+    )
 
 
 def extract_video_id(url: str) -> str:
@@ -133,17 +168,46 @@ async def process_scrape_request(request: ScrapeRequest):
         return ScrapeResponse(**storage.load_metadata(video_id))
 
     logger.info(f"Scraping TikTok: {video_id}")
-    try:
-        info = scraper.extract_video(url)
-        return await _download_and_build_response(video_id, info)
-    except Exception as e:
-        logger.error(f"Scrape failed for {video_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Scrape failed: {e}")
+    last_error = None
+
+    for attempt in range(1, 4):
+        try:
+            info = scraper.extract_video(url)
+            return await _download_and_build_response(video_id, info)
+        except Exception as e:
+            last_error = e
+            if _is_rate_limited(e):
+                logger.warning(f"Attempt {attempt} rate-limited/blocked: {e}")
+                if attempt < 3:
+                    try:
+                        await trigger_rotation()
+                    except RateLimitError:
+                        await asyncio.sleep(30)
+                    else:
+                        await asyncio.sleep(5)
+            else:
+                logger.error(f"Attempt {attempt} failed: {e}")
+                if attempt < 3:
+                    await asyncio.sleep(5)
+
+    raise HTTPException(
+        status_code=503 if _is_rate_limited(last_error) else 500,
+        detail=str(last_error)
+    )
 
 
 @router.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "tiktok"}
+    try:
+        status = await gluetun.get_vpn_status()
+        vpn_status = status.get("status", "").lower()
+        if vpn_status != "running":
+            raise HTTPException(status_code=503, detail=f"VPN not running: {vpn_status}")
+        return {"status": "healthy", "service": "tiktok", "vpn": status}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"VPN check failed: {e}")
 
 
 # Register with the global plugin registry on import.
