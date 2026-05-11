@@ -17,7 +17,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-scraper = TikTokScraper()
 gluetun = GluetunController()
 storage = MediaStorage(
     base_path=os.getenv("CACHE_PATH", "./cache"),
@@ -158,7 +157,7 @@ def extract_video_id(url: str) -> str:
     return url
 
 
-async def _download_and_build_response(video_id: str, info: dict) -> ScrapeResponse:
+async def _download_and_build_response(video_id: str, info: dict, scraper: TikTokScraper) -> ScrapeResponse:
     storage.prepare_post_dir(video_id)
 
     post_dir = storage._post_dir(video_id)
@@ -307,25 +306,28 @@ async def _download_and_build_response(video_id: str, info: dict) -> ScrapeRespo
 @router.post("/scrape", response_model=ScrapeResponse)
 async def process_scrape_request(request: ScrapeRequest):
     url = str(request.url)
-    if "vm.tiktok.com" in url or "vt.tiktok.com" in url or "/t/" in url:
-        url = scraper.resolve_short_url(url)
-
-    video_id = extract_video_id(url)
-
-    if storage.is_cached(video_id):
-        cached = storage.load_metadata(video_id)
-        if cached and _cached_media_ready(cached):
-            logger.info("Cache hit for %s", video_id)
-            return ScrapeResponse(**cached)
-        logger.info("Cache invalid for %s, missing media; re-scraping", video_id)
-
-    logger.info(f"Scraping TikTok: {video_id}")
+    video_id = None
     last_error = None
 
     for attempt in range(1, 4):
+        scraper = TikTokScraper()
         try:
+            if "vm.tiktok.com" in url or "vt.tiktok.com" in url or re.search(r"v[a-z]\.tiktok\.com", url) or "/t/" in url:
+                url = scraper.resolve_short_url(url)
+
+            if video_id is None:
+                video_id = extract_video_id(url)
+
+            if storage.is_cached(video_id):
+                cached = storage.load_metadata(video_id)
+                if cached and _cached_media_ready(cached):
+                    logger.info("Cache hit for %s", video_id)
+                    return ScrapeResponse(**cached)
+                logger.info("Cache invalid for %s, missing media; re-scraping", video_id)
+
+            logger.info(f"Scraping TikTok: {video_id} (attempt {attempt})")
             info = scraper.extract_video(url)
-            return await _download_and_build_response(video_id, info)
+            return await _download_and_build_response(video_id, info, scraper)
         except Exception as e:
             last_error = e
             if _is_rate_limited(e):
@@ -368,7 +370,7 @@ async def health_check():
 registry.register(ScraperPlugin(
     name="tiktok",
     router=router,
-    route_patterns=["tiktok.com", "vm.tiktok.com", "vt.tiktok.com"],
+    route_patterns=["tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "v*.tiktok.com"],
 ))
 
 # Standalone FastAPI app for container mode
