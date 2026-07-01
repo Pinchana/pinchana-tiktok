@@ -1,5 +1,8 @@
 # 🎵 Pinchana TikTok Scraper
 
+> [!WARNING]
+> The Live Photo implementation on this branch currently does not work at all. It is exploration and experimentation for TikTok Live Photo scraping behavior, not production-ready functionality.
+
 **Pinchana TikTok Scraper** is a specialized module for extracting high-quality media from TikTok. It uses a custom [yt-dlp](https://github.com/yt-dlp/yt-dlp) extractor to bypass platform restrictions and handles both videos and photo carousels.
 
 ---

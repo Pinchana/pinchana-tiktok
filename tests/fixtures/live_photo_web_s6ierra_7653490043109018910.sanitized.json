@@ -1,0 +1,54 @@
+{
+  "_fixture": {
+    "source_url": "https://vt.tiktok.com/ZSCaSR3fE",
+    "resolved_url": "https://www.tiktok.com/@s6ierra/photo/7653490043109018910",
+    "note": "User reports the last photo is a Live Photo, but public web JSON exposes only still images and audio."
+  },
+  "id": "7653490043109018910",
+  "desc": "Sweet as sugar btw",
+  "video": {
+    "cover": "https://cdn.example/tos-maliva-i-photomode-us/b9cd4e.jpeg",
+    "originCover": "https://cdn.example/tos-maliva-i-photomode-us/b9cd4e.jpeg",
+    "dynamicCover": "",
+    "playAddr": "",
+    "downloadAddr": "",
+    "duration": 0,
+    "width": 1080,
+    "height": 1920
+  },
+  "music": {
+    "playUrl": "https://cdn.example/audio/original-sound.mp3?mime_type=audio_mpeg",
+    "duration": 11
+  },
+  "imagePost": {
+    "title": "",
+    "cover": {
+      "imageURL": {
+        "urlList": ["https://cdn.example/tos-maliva-i-photomode-us/b9cd4e.jpeg"]
+      }
+    },
+    "images": [
+      {
+        "imageURL": {
+          "urlList": ["https://cdn.example/tos-maliva-i-photomode-us/b9cd4e.jpeg"]
+        },
+        "imageWidth": 2160,
+        "imageHeight": 2880
+      },
+      {
+        "imageURL": {
+          "urlList": ["https://cdn.example/tos-maliva-i-photomode-us/217487.jpeg"]
+        },
+        "imageWidth": 2160,
+        "imageHeight": 2880
+      },
+      {
+        "imageURL": {
+          "urlList": ["https://cdn.example/tos-maliva-i-photomode-us/e3be02.jpeg"]
+        },
+        "imageWidth": 2880,
+        "imageHeight": 2160
+      }
+    ]
+  }
+}

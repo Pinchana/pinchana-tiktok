@@ -1,0 +1,20 @@
+{
+  "id": "1111111111111111111",
+  "desc": "single photo",
+  "video": {
+    "cover": "https://cdn.example/photo/one.jpeg",
+    "playAddr": "",
+    "downloadAddr": ""
+  },
+  "imagePost": {
+    "images": [
+      {
+        "imageURL": {
+          "urlList": ["https://cdn.example/photo/one.jpeg"]
+        },
+        "imageWidth": 1080,
+        "imageHeight": 1920
+      }
+    ]
+  }
+}

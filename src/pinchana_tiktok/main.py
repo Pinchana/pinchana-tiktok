@@ -1,16 +1,19 @@
 """TikTok scraper plugin — mounts as a FastAPI router."""
 
 import asyncio
+import json
 import os
 import re
 import logging
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from fastapi import FastAPI, APIRouter, HTTPException
 from pinchana_core.models import ScrapeRequest, ScrapeResponse, MediaItem
 from pinchana_core.storage import MediaStorage
 from pinchana_core.plugins import ScraperPlugin, registry
 from pinchana_core.vpn import GluetunController, VpnRotationError
 from .api import TikTokScraper
+from .media import normalize_tiktok_info
 from yt_dlp import YoutubeDL
 
 logging.basicConfig(level=logging.INFO)
@@ -22,6 +25,14 @@ storage = MediaStorage(
     base_path=os.getenv("CACHE_PATH", "./cache"),
     max_size_gb=float(os.getenv("CACHE_MAX_SIZE_GB", "10.0")),
 )
+
+DEBUG_FILES = {
+    "raw_web": "raw-web.json",
+    "raw_aweme": "raw-aweme.json",
+    "raw_aweme_error": "raw-aweme-error.json",
+    "extractor_info": "extractor-info.json",
+    "normalized": "normalized.json",
+}
 
 
 def _media_url_to_path(url: str | None):
@@ -40,7 +51,7 @@ def _media_url_to_path(url: str | None):
     return storage.base_path / post_id / filename
 
 
-def _cached_media_ready(metadata: dict) -> bool:
+def _cached_media_ready(metadata: dict, *, debug_json: bool = False) -> bool:
     if not isinstance(metadata, dict):
         return False
 
@@ -64,6 +75,15 @@ def _cached_media_ready(metadata: dict) -> bool:
         path = _media_url_to_path(url)
         if not path or not path.exists():
             return False
+
+    if debug_json:
+        debug_urls = metadata.get("debug_json_urls") or {}
+        if not isinstance(debug_urls, dict) or not debug_urls:
+            return False
+        for url in debug_urls.values():
+            path = _media_url_to_path(url)
+            if not path or not path.exists():
+                return False
 
     return True
 
@@ -117,6 +137,73 @@ def _download_with_ydl(ydl: YoutubeDL, info: dict) -> dict:
     return ydl.sanitize_info(result)
 
 
+def _json_safe(value):
+    try:
+        json.dumps(value)
+        return value
+    except TypeError:
+        if isinstance(value, dict):
+            return {str(k): _json_safe(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_json_safe(v) for v in value]
+        return str(value)
+
+
+def _debug_json_urls(video_id: str, post_dir: Path) -> dict[str, str]:
+    debug_dir = post_dir / "debug"
+    urls = {}
+    for key, filename in DEBUG_FILES.items():
+        if (debug_dir / filename).exists():
+            urls[key] = f"/media/tiktok/{video_id}/debug/{filename}"
+    return urls
+
+
+def _save_debug_json(video_id: str, post_dir: Path, payloads: dict) -> dict[str, str]:
+    debug_dir = post_dir / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    for key, filename in DEBUG_FILES.items():
+        payload = payloads.get(key)
+        if payload is None:
+            continue
+        path = debug_dir / filename
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(_json_safe(payload), f, ensure_ascii=False, indent=2)
+    return _debug_json_urls(video_id, post_dir)
+
+
+def _extractor_info_for_debug(info: dict) -> dict:
+    return {key: value for key, value in info.items() if not key.startswith("__raw_")}
+
+
+def _ext_from_url(url: str, default: str) -> str:
+    path_ext = Path(urlparse(url).path).suffix.lstrip(".").lower()
+    if path_ext:
+        return "jpg" if path_ext == "jpeg" else path_ext
+    mime = (parse_qs(urlparse(url).query).get("mime_type") or [""])[-1].lower()
+    return {
+        "audio_mpeg": "mp3",
+        "audio/mp3": "mp3",
+        "audio_mp4": "m4a",
+        "audio/mp4": "m4a",
+        "video_mp4": "mp4",
+        "video/mp4": "mp4",
+        "image_jpeg": "jpg",
+        "image/jpeg": "jpg",
+    }.get(mime, default)
+
+
+async def _download_url(url: str | None, dest: Path) -> bool:
+    if not url:
+        return False
+    return await storage.download(url, dest)
+
+
+def _cleanup_prefix(post_dir: Path, prefix: str) -> None:
+    for path in post_dir.glob(f"{prefix}.*"):
+        if path.is_file():
+            path.unlink()
+
+
 class RateLimitError(Exception):
     """Raised when TikTok blocks the request (403/429/IP ban)."""
     pass
@@ -157,7 +244,13 @@ def extract_video_id(url: str) -> str:
     return url
 
 
-async def _download_and_build_response(video_id: str, info: dict, scraper: TikTokScraper) -> ScrapeResponse:
+async def _download_and_build_response(
+    video_id: str,
+    info: dict,
+    scraper: TikTokScraper,
+    *,
+    debug_json: bool = False,
+) -> ScrapeResponse:
     storage.prepare_post_dir(video_id)
 
     post_dir = storage._post_dir(video_id)
@@ -166,14 +259,18 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
 
     title = info.get("title") or info.get("description") or video_id
     author = info.get("uploader") or info.get("channel") or ""
-    media_type = info.get("_type", "video")
+    normalized = normalize_tiktok_info(info)
+    media_type = normalized["kind"]
 
     thumbnail_url = ""
     video_url = None
     carousel_items = []
     audio_url = None
+    available = normalized.get("available")
+    reason = normalized.get("reason")
+    duration = normalized.get("duration")
 
-    if media_type == "playlist":
+    if media_type == "photo_carousel":
         download_error = False
         image_dir = post_dir / "images"
         image_dir.mkdir(parents=True, exist_ok=True)
@@ -237,9 +334,53 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
             audio_ext = audio_file.suffix.lstrip(".")
             audio_url = f"/media/tiktok/{video_id}/audio.{audio_ext}"
 
-        media_type = "carousel"
-
         if download_error and not carousel_items and not audio_url:
+            raise HTTPException(status_code=503, detail="Media download failed")
+
+    elif media_type in ("photo", "live_photo"):
+        download_error = False
+        image_url = normalized.get("image_url")
+        image_ext = _ext_from_url(str(image_url), "jpg") if image_url else "jpg"
+        thumb_file = post_dir / f"thumbnail.{image_ext}"
+        _cleanup_prefix(post_dir, "thumbnail")
+        if image_url:
+            if await _download_url(image_url, thumb_file):
+                thumbnail_url = f"/media/tiktok/{video_id}/thumbnail.{image_ext}"
+            else:
+                download_error = True
+                logger.error("Still image download failed")
+
+        motion_url = normalized.get("video_url")
+        if media_type == "live_photo" and motion_url:
+            video_ext = _ext_from_url(str(motion_url), "mp4")
+            video_file = post_dir / f"video.{video_ext}"
+            _cleanup_prefix(post_dir, "video")
+            if await _download_url(motion_url, video_file):
+                video_url = f"/media/tiktok/{video_id}/video.{video_ext}"
+            else:
+                download_error = True
+                logger.error("Live Photo motion download failed")
+                available = False
+                reason = "Motion asset download failed"
+
+        source_audio_url = normalized.get("audio_url")
+        if source_audio_url:
+            audio_ext = _ext_from_url(str(source_audio_url), "mp3")
+            audio_file = post_dir / f"audio.{audio_ext}"
+            _cleanup_prefix(post_dir, "audio")
+            if await _download_url(source_audio_url, audio_file):
+                audio_url = f"/media/tiktok/{video_id}/audio.{audio_ext}"
+            else:
+                logger.error("Audio download failed")
+
+        if media_type == "live_photo" and thumbnail_url and video_url:
+            available = True
+            reason = None
+        elif media_type == "live_photo" and thumbnail_url and not video_url:
+            available = False
+            reason = reason or "Motion asset not exposed in current TikTok responses"
+
+        if download_error and not thumbnail_url:
             raise HTTPException(status_code=503, detail="Media download failed")
 
     else:
@@ -285,6 +426,16 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
         if download_error and not video_url:
             raise HTTPException(status_code=503, detail="Media download failed")
 
+    debug_urls = None
+    if debug_json:
+        debug_urls = _save_debug_json(video_id, post_dir, {
+            "raw_web": info.get("__raw_web"),
+            "raw_aweme": info.get("__raw_aweme"),
+            "raw_aweme_error": info.get("__raw_aweme_error"),
+            "extractor_info": _extractor_info_for_debug(info),
+            "normalized": normalized,
+        })
+
     response = ScrapeResponse(
         shortcode=video_id,
         caption=title,
@@ -293,12 +444,14 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
         thumbnail_url=thumbnail_url,
         video_url=video_url,
         audio_url=audio_url,
+        duration=duration,
         carousel=carousel_items if carousel_items else None,
+        available=available,
+        reason=reason,
+        debug_json_urls=debug_urls,
     )
 
     metadata = response.model_dump()
-    if audio_url:
-        metadata["audio_url"] = audio_url
     storage.save_metadata(video_id, metadata)
     return response
 
@@ -318,16 +471,16 @@ async def process_scrape_request(request: ScrapeRequest):
             if video_id is None:
                 video_id = extract_video_id(url)
 
-            if storage.is_cached(video_id):
+            if storage.is_cached(video_id) and not request.force_refresh:
                 cached = storage.load_metadata(video_id)
-                if cached and _cached_media_ready(cached):
+                if cached and _cached_media_ready(cached, debug_json=request.debug_json):
                     logger.info("Cache hit for %s", video_id)
                     return ScrapeResponse(**cached)
                 logger.info("Cache invalid for %s, missing media; re-scraping", video_id)
 
             logger.info(f"Scraping TikTok: {video_id} (attempt {attempt})")
-            info = scraper.extract_video(url)
-            return await _download_and_build_response(video_id, info, scraper)
+            info = scraper.extract_video(url, include_raw=request.debug_json, try_mobile=True)
+            return await _download_and_build_response(video_id, info, scraper, debug_json=request.debug_json)
         except Exception as e:
             last_error = e
             if _is_rate_limited(e):

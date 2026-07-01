@@ -218,7 +218,9 @@ class TikTokBaseIE(InfoExtractor):
             }), headers={'X-Argus': ''}), ('aweme_details', 0, {dict}))
         if not aweme_detail:
             raise ExtractorError('Unable to extract aweme detail info', video_id=aweme_id)
-        return self._parse_aweme_video_app(aweme_detail)
+        info = self._parse_aweme_video_app(aweme_detail)
+        info['__raw_aweme'] = aweme_detail
+        return info
 
     def _solve_challenge_and_set_cookies(self, webpage):
         challenge_data = traverse_obj(webpage, (
@@ -695,12 +697,15 @@ class TikTokBaseIE(InfoExtractor):
                 })
 
             if entries:
-                return self.playlist_result(
+                result = self.playlist_result(
                     entries, video_id,
                     traverse_obj(aweme_detail, ('desc', {truncate_string(left=72)})))
+                result['__raw_web'] = aweme_detail
+                return result
 
         return {
             'id': video_id,
+            '__raw_web': aweme_detail,
             'formats': None if extract_flat else self._extract_web_formats(aweme_detail),
             'subtitles': None if extract_flat else self.extract_subtitles(aweme_detail, video_id, None),
             'http_headers': {'Referer': webpage_url},

@@ -1,0 +1,27 @@
+{
+  "id": "3333333333333333333",
+  "desc": "synthetic live photo",
+  "duration": 3,
+  "imagePost": {
+    "images": [
+      {
+        "imageURL": {
+          "urlList": ["https://cdn.example/live/still.jpeg"]
+        },
+        "imageWidth": 1440,
+        "imageHeight": 1920
+      }
+    ]
+  },
+  "livePhoto": {
+    "pairedVideo": {
+      "playAddr": {
+        "urlList": ["https://cdn.example/live/motion.mp4"]
+      }
+    }
+  },
+  "music": {
+    "playUrl": "https://cdn.example/live/audio.m4a?mime_type=audio_mp4",
+    "duration": 3
+  }
+}

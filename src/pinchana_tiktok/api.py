@@ -22,7 +22,7 @@ class TikTokScraper:
         self._ydl_opts = {**DEFAULT_YDL_OPTS, **ydl_opts}
         self._ydl = YoutubeDL(self._ydl_opts)
 
-    def extract_video(self, url: str) -> dict:
+    def extract_video(self, url: str, include_raw: bool = False, try_mobile: bool = True) -> dict:
         """Extract metadata for a single TikTok video or photo post.
 
         Args:
@@ -35,6 +35,8 @@ class TikTokScraper:
         """
         ie = TikTokIE(self._ydl)
         info = ie.extract(url)
+        if try_mobile:
+            self._attach_mobile_aweme(info)
         # yt-dlp expects these fields when the info dict is later passed
         # to a fresh YoutubeDL instance for downloading.
         info.setdefault('extractor', ie.IE_NAME)
@@ -47,6 +49,30 @@ class TikTokScraper:
                     entry.setdefault('extractor_key', ie.ie_key())
                     entry.setdefault('webpage_url', entry.get('url') or url)
         return info
+
+    def _attach_mobile_aweme(self, info: dict) -> None:
+        aweme_id = info.get("id")
+        if not aweme_id:
+            return
+
+        opts = {
+            **DEFAULT_YDL_OPTS,
+            "extractor_args": {"tiktok": {"app_info": [""]}},
+        }
+        app_ydl = YoutubeDL(opts)
+        try:
+            for cookie in self._ydl.cookiejar:
+                app_ydl.cookiejar.set_cookie(cookie)
+            app_info = TikTokIE(app_ydl)._extract_aweme_app(str(aweme_id))
+        except Exception as e:
+            info["__raw_aweme_error"] = {
+                "type": type(e).__name__,
+                "message": str(e),
+            }
+            return
+
+        if isinstance(app_info, dict) and isinstance(app_info.get("__raw_aweme"), dict):
+            info["__raw_aweme"] = app_info["__raw_aweme"]
 
     def extract_user(self, url: str) -> dict:
         """Extract a user's video list as a playlist.

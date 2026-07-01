@@ -1,0 +1,19 @@
+{
+  "id": "2222222222222222222",
+  "title": "normal video",
+  "formats": [
+    {
+      "format_id": "play",
+      "url": "https://cdn.example/video/play.mp4",
+      "ext": "mp4",
+      "vcodec": "h264",
+      "acodec": "aac"
+    }
+  ],
+  "thumbnails": [
+    {
+      "url": "https://cdn.example/video/thumbnail.jpeg"
+    }
+  ],
+  "duration": 7
+}
