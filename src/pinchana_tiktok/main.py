@@ -22,6 +22,7 @@ storage = MediaStorage(
     base_path=os.getenv("CACHE_PATH", "./cache"),
     max_size_gb=float(os.getenv("CACHE_MAX_SIZE_GB", "10.0")),
 )
+YTDLP_LIMIT = asyncio.Semaphore(max(1, int(os.getenv("YTDLP_CONCURRENCY", "2"))))
 
 
 def _media_url_to_path(url: str | None):
@@ -117,6 +118,11 @@ def _download_with_ydl(ydl: YoutubeDL, info: dict) -> dict:
     return ydl.sanitize_info(result)
 
 
+async def _download_with_ydl_bounded(ydl: YoutubeDL, info: dict) -> dict:
+    async with YTDLP_LIMIT:
+        return await asyncio.to_thread(_download_with_ydl, ydl, info)
+
+
 class RateLimitError(Exception):
     """Raised when TikTok blocks the request (403/429/IP ban)."""
     pass
@@ -202,7 +208,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
             image_outtmpl = str(image_dir / "%(playlist_index)02d.%(ext)s")
             image_ydl = _build_ydl(image_outtmpl, cookies_from=scraper._ydl)
             try:
-                await asyncio.to_thread(_download_with_ydl, image_ydl, image_info)
+                await _download_with_ydl_bounded(image_ydl, image_info)
             except Exception as e:
                 download_error = True
                 logger.error("Image download failed: %s", e)
@@ -227,7 +233,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
             audio_outtmpl = str(post_dir / "audio.%(ext)s")
             audio_ydl = _build_ydl(audio_outtmpl, fmt="bestaudio/best", noplaylist=True, cookies_from=scraper._ydl)
             try:
-                await asyncio.to_thread(_download_with_ydl, audio_ydl, audio_entry)
+                await _download_with_ydl_bounded(audio_ydl, audio_entry)
             except Exception as e:
                 download_error = True
                 logger.error("Audio download failed: %s", e)
@@ -247,7 +253,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
         video_outtmpl = str(post_dir / "video.%(ext)s")
         video_ydl = _build_ydl(video_outtmpl, fmt="best[ext=mp4]/best", noplaylist=True, cookies_from=scraper._ydl)
         try:
-            await asyncio.to_thread(_download_with_ydl, video_ydl, info)
+            await _download_with_ydl_bounded(video_ydl, info)
         except Exception as e:
             download_error = True
             logger.error("Video download failed: %s", e)
@@ -265,7 +271,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
             cookies_from=scraper._ydl,
         )
         try:
-            await asyncio.to_thread(_download_with_ydl, thumb_ydl, info)
+            await _download_with_ydl_bounded(thumb_ydl, info)
         except Exception as e:
             download_error = True
             logger.error("Thumbnail download failed: %s", e)
@@ -303,8 +309,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
     return response
 
 
-@router.post("/scrape", response_model=ScrapeResponse)
-async def process_scrape_request(request: ScrapeRequest):
+async def _process_scrape_request(request: ScrapeRequest):
     url = str(request.url)
     video_id = None
     last_error = None
@@ -352,12 +357,18 @@ async def process_scrape_request(request: ScrapeRequest):
     )
 
 
+@router.post("/scrape", response_model=ScrapeResponse)
+async def process_scrape_request(request: ScrapeRequest):
+    video_id = extract_video_id(str(request.url))
+    return await storage.singleflight(video_id, lambda: _process_scrape_request(request))
+
+
 @router.get("/health")
 async def health_check():
     try:
         status = await gluetun.get_vpn_status()
         vpn_status = status.get("status", "").lower()
-        if vpn_status != "running":
+        if gluetun.enabled and vpn_status != "running":
             raise HTTPException(status_code=503, detail=f"VPN not running: {vpn_status}")
         return {"status": "healthy", "service": "tiktok", "vpn": status}
     except HTTPException:
@@ -376,3 +387,8 @@ registry.register(ScraperPlugin(
 # Standalone FastAPI app for container mode
 app = FastAPI(title="Pinchana TikTok", version="0.1.0")
 app.include_router(router)
+
+
+@app.on_event("shutdown")
+async def close_storage_client():
+    await storage.close()
