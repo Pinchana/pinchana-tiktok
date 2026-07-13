@@ -6,7 +6,7 @@
 
 ## ✨ Key Features
 
-- **📽 Full Media Support:** Extracts videos (with/without watermarks), image galleries (carousels), and background audio.
+- **📽 Full Media Support:** Extracts videos (with/without watermarks), image galleries (carousels), and MP3 background audio for image slideshows.
 - **🛡 Anti-Ban Integration:** Automatically detects 403/429 errors and signals the VPN (Gluetun) to rotate IPs.
 - **💾 Local Caching:** Saves downloaded media to a persistent LRU cache for fast re-serving.
 - **🚀 Standalone Service:** Runs as a lightweight FastAPI service that can be proxied by the Pinchana Gateway.

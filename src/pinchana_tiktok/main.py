@@ -61,6 +61,9 @@ def _cached_media_ready(metadata: dict) -> bool:
                 if url:
                     urls.append(url)
 
+    if carousel and metadata.get("audio_url") and not str(metadata["audio_url"]).endswith(".mp3"):
+        return False
+
     for url in urls:
         path = _media_url_to_path(url)
         if not path or not path.exists():
@@ -76,6 +79,7 @@ def _build_ydl(
     write_thumbnail: bool = False,
     skip_download: bool = False,
     noplaylist: bool = False,
+    extract_audio_mp3: bool = False,
     cookies_from: YoutubeDL | None = None,
 ) -> YoutubeDL:
     opts: dict = {
@@ -93,6 +97,12 @@ def _build_ydl(
         opts["writethumbnail"] = True
     if skip_download:
         opts["skip_download"] = True
+    if extract_audio_mp3:
+        opts["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }]
     ydl = YoutubeDL(opts)
     if cookies_from:
         for cookie in cookies_from.cookiejar:
@@ -230,15 +240,26 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
 
         audio_url = None
         if audio_entry:
+            for stale_audio in post_dir.glob("audio.*"):
+                if stale_audio.is_file():
+                    stale_audio.unlink()
             audio_outtmpl = str(post_dir / "audio.%(ext)s")
-            audio_ydl = _build_ydl(audio_outtmpl, fmt="bestaudio/best", noplaylist=True, cookies_from=scraper._ydl)
+            audio_ydl = _build_ydl(
+                audio_outtmpl,
+                fmt="bestaudio/best",
+                noplaylist=True,
+                extract_audio_mp3=True,
+                cookies_from=scraper._ydl,
+            )
             try:
                 await _download_with_ydl_bounded(audio_ydl, audio_entry)
             except Exception as e:
                 download_error = True
                 logger.error("Audio download failed: %s", e)
 
-        audio_file = _find_downloaded_file(post_dir, "audio")
+        audio_file = post_dir / "audio.mp3"
+        if not audio_file.exists():
+            audio_file = _find_downloaded_file(post_dir, "audio")
         if audio_file:
             audio_ext = audio_file.suffix.lstrip(".")
             audio_url = f"/media/tiktok/{video_id}/audio.{audio_ext}"
