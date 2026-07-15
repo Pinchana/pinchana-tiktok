@@ -138,6 +138,21 @@ class RateLimitError(Exception):
     pass
 
 
+class AuthenticationRequiredError(Exception):
+    """Raised when TikTok requires login or audience confirmation."""
+    pass
+
+
+class MediaNotFoundError(Exception):
+    """Raised when a TikTok post was removed or cannot be found."""
+    pass
+
+
+class ExtractionError(Exception):
+    """Raised for unexpected extractor failures that must not be retried."""
+    pass
+
+
 async def trigger_rotation():
     """Trigger VPN IP rotation."""
     logger.warning("Rotating VPN IP...")
@@ -159,11 +174,63 @@ def _is_rate_limited(e: Exception) -> bool:
             "429",
             "rate limit",
             "too many requests",
-            "verify",
+            "verify you are human",
             "captcha",
-            "unavailable",
+            "challenge",
+            "timed out",
+            "timeout",
+            "connection reset",
+            "connection refused",
         )
     )
+
+
+def _classify_extraction_error(error: Exception) -> Exception:
+    if isinstance(
+        error,
+        (AuthenticationRequiredError, MediaNotFoundError, RateLimitError, ExtractionError),
+    ):
+        return error
+
+    message = str(error)
+    lowered = message.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "log in for access",
+            "login for access",
+            "requiring login",
+            "login required",
+            "cookies-from-browser",
+            "cookies for the authentication",
+            "private video",
+            "private post",
+        )
+    ):
+        return AuthenticationRequiredError(message)
+    if any(
+        marker in lowered
+        for marker in (
+            "not found",
+            "has been removed",
+            "was removed",
+            "video unavailable",
+            "post unavailable",
+            "does not exist",
+        )
+    ):
+        return MediaNotFoundError(message)
+    if _is_rate_limited(error):
+        return RateLimitError(message)
+    return ExtractionError(message)
+
+
+def _vpn_enabled() -> bool:
+    return os.getenv("VPN_ENABLED", "true").lower() in ("1", "true", "yes")
+
+
+def _http_error(status_code: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
 
 
 def extract_video_id(url: str) -> str:
@@ -333,9 +400,8 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
 async def _process_scrape_request(request: ScrapeRequest):
     url = str(request.url)
     video_id = None
-    last_error = None
 
-    for attempt in range(1, 4):
+    for attempt in range(1, 3):
         scraper = TikTokScraper()
         try:
             if "vm.tiktok.com" in url or "vt.tiktok.com" in url or re.search(r"v[a-z]\.tiktok\.com", url) or "/t/" in url:
@@ -354,28 +420,38 @@ async def _process_scrape_request(request: ScrapeRequest):
             logger.info(f"Scraping TikTok: {video_id} (attempt {attempt})")
             info = scraper.extract_video(url)
             return await _download_and_build_response(video_id, info, scraper)
+        except HTTPException:
+            raise
         except Exception as e:
-            last_error = e
-            if _is_rate_limited(e):
-                logger.warning(f"Attempt {attempt} rate-limited/blocked: {e}")
-                if attempt < 3:
+            classified = _classify_extraction_error(e)
+            if isinstance(classified, AuthenticationRequiredError):
+                logger.info("TikTok post %s requires anonymous access confirmation", video_id)
+                raise _http_error(
+                    403,
+                    "authentication_required",
+                    "This TikTok post requires login or audience confirmation",
+                ) from e
+            if isinstance(classified, MediaNotFoundError):
+                raise _http_error(404, "not_found", "TikTok post not found") from e
+            if isinstance(classified, RateLimitError):
+                logger.warning("TikTok attempt %d was blocked for %s: %s", attempt, video_id, e)
+                if attempt < 2 and _vpn_enabled():
                     try:
                         await trigger_rotation()
-                    except RateLimitError:
-                        await asyncio.sleep(30)
-                    else:
-                        await asyncio.sleep(5)
-            else:
-                logger.error(f"Attempt {attempt} failed: {e}")
-                if attempt < 3:
-                    await asyncio.sleep(5)
+                    except RateLimitError as rotation_error:
+                        logger.warning("TikTok VPN rotation failed: %s", rotation_error)
+                        raise _http_error(
+                            503, "rate_limited", "TikTok is temporarily rate limited"
+                        ) from rotation_error
+                    continue
+                raise _http_error(
+                    503, "rate_limited", "TikTok is temporarily rate limited"
+                ) from e
 
-    if isinstance(last_error, HTTPException):
-        raise last_error
-    raise HTTPException(
-        status_code=503 if _is_rate_limited(last_error) else 500,
-        detail=str(last_error)
-    )
+            logger.exception("TikTok extraction failed for %s: %s", video_id, e)
+            raise _http_error(502, "extraction_failed", "TikTok extraction failed") from e
+
+    raise RuntimeError("unreachable")
 
 
 @router.post("/scrape", response_model=ScrapeResponse)
