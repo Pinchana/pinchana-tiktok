@@ -1,63 +1,39 @@
-# 🎵 Pinchana TikTok Scraper
+# Pinchana TikTok
 
-**Pinchana TikTok Scraper** is a specialized module for extracting high-quality media from TikTok. It uses a custom [yt-dlp](https://github.com/yt-dlp/yt-dlp) extractor to bypass platform restrictions and handles both videos and photo carousels.
+This FastAPI module extracts supported public TikTok posts through a dedicated yt-dlp workflow. It handles ordinary videos and photo slideshows, including slideshow background audio when available.
 
----
+## Processing flow
 
-## ✨ Key Features
+1. Resolve supported canonical and short TikTok URLs.
+2. Extract media metadata with the project extractor.
+3. Rotate the Gluetun connection and retry within the bounded policy after relevant platform blocks.
+4. Download ordered media to `/app/cache/tiktok/{post_id}` in containers.
 
-- **📽 Full Media Support:** Extracts videos (with/without watermarks), image galleries (carousels), and MP3 background audio for image slideshows.
-- **🛡 Anti-Ban Integration:** Automatically detects 403/429 errors and signals the VPN (Gluetun) to rotate IPs.
-- **💾 Local Caching:** Saves downloaded media to a persistent LRU cache for fast re-serving.
-- **🚀 Standalone Service:** Runs as a lightweight FastAPI service that can be proxied by the Pinchana Gateway.
+The gateway's API v1 response represents slideshow images as ordered `content` assets and their audio as a `soundtrack` asset.
 
----
+## API
 
-## 🏗 Architecture
+- `POST /scrape` accepts `{"url":"https://www.tiktok.com/@account/video/POST_ID"}`.
+- `GET /health` reports module and VPN readiness.
 
-The scraper follows a "Scrape -> Download -> Cache" workflow:
-1. **Metadata Extraction:** Uses `yt-dlp` with a custom extractor to get direct media URLs.
-2. **Download:** Downloads files directly through the VPN tunnel.
-3. **Storage:** Organizes files into a structured directory under `/app/cache/tiktok/{video_id}`.
+External clients should call the gateway's authenticated `POST /v1/scrape` route.
 
----
+## Configuration
 
-## 📡 API Reference
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CACHE_PATH` | `./cache` | Base media cache path |
+| `CACHE_MAX_SIZE_GB` | `10.0` | Maximum cache size before eviction |
+| `GLUETUN_CONTROL_URL` | `http://localhost:8000` | Private Gluetun control endpoint |
 
-### `POST /scrape`
-Extracts and downloads media for a given TikTok URL.
-```json
-{
-  "url": "https://www.tiktok.com/@user/video/1234567890"
-}
+## Development
+
+```sh
+uv sync --frozen
+uv run uvicorn pinchana_tiktok.main:app --host 0.0.0.0 --port 8081 --reload
 ```
 
-### `GET /health`
-Checks the service health and VPN connectivity.
-
----
-
-## ⚙️ Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CACHE_PATH` | `./cache` | Where to store downloaded media. |
-| `CACHE_MAX_SIZE_GB` | `10.0` | Max size for the LRU cache. |
-| `GLUETUN_CONTROL_URL` | `http://localhost:8000` | URL for the Gluetun control API. |
-
----
-
-## 🛠 Development
-
-Managed by `uv`.
-
-```bash
-uv sync
-uv run uvicorn src.pinchana_tiktok.main:app --host 0.0.0.0 --port 8081
+```sh
+# Run from the parent pinchana-api directory.
+docker build --file pinchana-tiktok/Dockerfile --tag pinchana-tiktok:local .
 ```
-
----
-
-## 📜 License
-
-MIT
