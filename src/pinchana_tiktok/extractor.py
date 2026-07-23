@@ -903,14 +903,27 @@ class TikTokBaseIE(InfoExtractor):
 
 
 class TikTokIE(TikTokBaseIE):
-    _VALID_URL = r'https?://www\.tiktok\.com/(?:embed|@(?P<user_id>[\w\.-]+)?/(?:video|photo))/(?P<id>\d+)'
+    _VALID_URL = r'https?://(?:(?:vt|vm|v|m|www)\.)?tiktok\.com/(?:embed/|t/|v/|@(?P<user_id>[\w\.-]+)?/(?:video|photo)/)?(?P<id>[\w\d]+)'
     _EMBED_REGEX = [rf'<(?:script|iframe)[^>]+\bsrc=(["\'])(?P<url>{_VALID_URL})']
 
 
     def _real_extract(self, url):
-        video_id, user_id = self._match_valid_url(url).group('id', 'user_id')
+        m = self._match_valid_url(url)
+        video_id = m.group('id')
+        user_id = m.group('user_id')
 
-        if self._KNOWN_APP_INFO:
+        if not video_id.isdigit():
+            res = self._download_webpage_handle(url, video_id, note='Resolving shortlink redirect', impersonate=True)
+            if res:
+                _, urlh = res
+                redirected_url = urlh.url
+                m_red = re.search(r'https?://www\.tiktok\.com/(?:embed|@(?P<user_id>[\w\.-]+)?/(?:video|photo))/(?P<id>\d+)', redirected_url)
+                if m_red:
+                    video_id = m_red.group('id')
+                    user_id = m_red.group('user_id')
+                    url = redirected_url
+
+        if self._KNOWN_APP_INFO and video_id.isdigit():
             try:
                 return self._extract_aweme_app(video_id)
             except ExtractorError as e:
