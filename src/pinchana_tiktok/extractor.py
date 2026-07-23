@@ -112,7 +112,91 @@ class TikTokBaseIE(InfoExtractor):
             r'<script[^>]+\bid="(?:SIGI_STATE|sigi-persisted-data)"[^>]*>', webpage,
             'sigi state', display_id, end_pattern=r'</script>', default={})
 
+    def _parse_frontity_video_data(self, webpage, display_id):
+        frontity = self._search_json(
+            r'<script[^>]+\bid="__FRONTITY_CONNECT_STATE__"[^>]*>', webpage,
+            'frontity state', display_id, end_pattern=r'</script>', default={}, fatal=False)
+        if not frontity or not isinstance(frontity, dict):
+            return None
+        source_data = traverse_obj(frontity, ('source', 'data', {dict})) or {}
+        for key, val in source_data.items():
+            if isinstance(val, dict) and 'videoData' in val:
+                vd = val['videoData']
+                item = vd.get('itemInfos', {})
+                author = vd.get('authorInfos', {})
+                music = vd.get('musicInfos', {})
+                image_post = vd.get('imagePostInfo', {})
+
+                video_obj = item.get('video', {})
+                urls = video_obj.get('urls', [])
+                covers = item.get('covers', [])
+
+                play_url = music.get('playUrl')
+                if isinstance(play_url, list) and play_url:
+                    first = play_url[0]
+                    play_url = first.get('url') if isinstance(first, dict) else str(first)
+
+                images_converted = []
+                if image_post and 'images' in image_post:
+                    for img in image_post['images']:
+                        disp = img.get('displayImage', {}) or img.get('display_image', {})
+                        u_list = disp.get('imageURL', {}).get('urlList') or disp.get('url_list') or []
+                        if u_list:
+                            images_converted.append({'imageURL': {'urlList': u_list}})
+
+                item_struct = {
+                    'id': item.get('id'),
+                    'desc': item.get('text', ''),
+                    'createTime': item.get('createTime'),
+                    'author': {
+                        'id': author.get('id'),
+                        'uniqueId': author.get('uniqueId') or author.get('secUid', ''),
+                        'nickname': author.get('nickName', ''),
+                        'avatarThumb': author.get('avatar'),
+                        'secUid': author.get('secUid', ''),
+                    },
+                    'video': {
+                        'id': item.get('id'),
+                        'duration': video_obj.get('duration'),
+                        'playAddr': urls[0] if urls else '',
+                        'downloadAddr': urls[0] if urls else '',
+                        'cover': covers[0] if covers else '',
+                        'dynamicCover': covers[1] if len(covers) > 1 else '',
+                        'originCover': covers[-1] if covers else '',
+                        'bitrate': video_obj.get('bitrate'),
+                        'ratio': video_obj.get('ratio'),
+                    },
+                    'music': {
+                        'id': music.get('musicId'),
+                        'title': music.get('musicName'),
+                        'authorName': music.get('authorName'),
+                        'playUrl': play_url,
+                        'coverThumb': music.get('coverThumb'),
+                    },
+                    'stats': {
+                        'diggCount': item.get('diggCount', 0),
+                        'shareCount': item.get('shareCount', 0),
+                        'commentCount': item.get('commentCount', 0),
+                        'playCount': item.get('playCount', 0),
+                    },
+                }
+                if images_converted:
+                    item_struct['imagePost'] = {'images': images_converted}
+
+                return {
+                    'webapp.video-detail': {
+                        'statusCode': 0,
+                        'itemInfo': {'itemStruct': item_struct}
+                    }
+                }
+        return None
+
     def _get_universal_data(self, webpage, display_id):
+        # 0. Try __FRONTITY_CONNECT_STATE__ (Embed V2 data)
+        frontity_data = self._parse_frontity_video_data(webpage, display_id)
+        if frontity_data:
+            return frontity_data
+
         # 1. Try __UNIVERSAL_DATA_FOR_REHYDRATION__
         univ_scope = traverse_obj(self._search_json(
             r'<script[^>]+\bid="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>', webpage,
@@ -341,6 +425,17 @@ class TikTokBaseIE(InfoExtractor):
 
     def _extract_web_data_and_status(self, url, video_id, fatal=True):
         video_data, status = {}, -1
+
+        # Tier 1: Try Embed V2 page (100% unblocked on Datacenter IPs, no login/WAF challenges)
+        try:
+            embed_url = f'https://www.tiktok.com/embed/v2/{video_id}'
+            embed_webpage = self._download_webpage(embed_url, video_id, note='Downloading Embed V2 page', fatal=False, impersonate=True)
+            if embed_webpage:
+                frontity_data = self._parse_frontity_video_data(embed_webpage, video_id)
+                if frontity_data and traverse_obj(frontity_data, ('webapp.video-detail', 'itemInfo', 'itemStruct', {dict})):
+                    return traverse_obj(frontity_data, ('webapp.video-detail', 'itemInfo', 'itemStruct', {dict})), 0
+        except Exception as e:
+            self.report_warning(f'Embed V2 fetch failed for {video_id}: {e}')
 
         def get_webpage(note='Downloading webpage'):
             res = self._download_webpage_handle(url, video_id, note, fatal=fatal, impersonate=True)
