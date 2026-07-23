@@ -59,7 +59,7 @@ class TikTokBaseIE(InfoExtractor):
     @functools.cached_property
     def _KNOWN_APP_INFO(self):
         # If we have a genuine device ID, we may not need any IID
-        default = [''] if self._KNOWN_DEVICE_ID else []
+        default = ['']
         return self._configuration_arg('app_info', default, ie_key=TikTokIE)
 
     @functools.cached_property
@@ -197,7 +197,7 @@ class TikTokBaseIE(InfoExtractor):
                 'User-Agent': self._APP_USER_AGENT,
                 'Accept': 'application/json',
                 **(headers or {}),
-            }, query=query, data=data)
+            }, query=query, data=data, impersonate=True)
 
     def _build_api_query(self, query):
         return filter_dict({
