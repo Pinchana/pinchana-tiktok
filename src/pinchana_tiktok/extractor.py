@@ -113,10 +113,77 @@ class TikTokBaseIE(InfoExtractor):
             'sigi state', display_id, end_pattern=r'</script>', default={})
 
     def _get_universal_data(self, webpage, display_id):
-        return traverse_obj(self._search_json(
+        # 1. Try __UNIVERSAL_DATA_FOR_REHYDRATION__
+        univ_scope = traverse_obj(self._search_json(
             r'<script[^>]+\bid="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>', webpage,
-            'universal data', display_id, end_pattern=r'</script>', default={}),
-            ('__DEFAULT_SCOPE__', {dict})) or {}
+            'universal data', display_id, end_pattern=r'</script>', default={}, fatal=False),
+            ('__DEFAULT_SCOPE__', {dict}))
+        if univ_scope and traverse_obj(univ_scope, ('webapp.video-detail', 'itemInfo', 'itemStruct', {dict})):
+            return univ_scope
+
+        # 2. Try SIGI_STATE
+        sigi = self._search_json(
+            r'<script[^>]+\bid="(?:SIGI_STATE|sigi-persisted-data)"[^>]*>', webpage,
+            'sigi state', display_id, end_pattern=r'</script>', default={}, fatal=False)
+        if not sigi:
+            sigi = self._search_json(
+                r'window\[["\']SIGI_STATE["\']\]\s*=\s*', webpage,
+                'sigi state var', display_id, end_pattern=r';', default={}, fatal=False)
+        if sigi and isinstance(sigi, dict) and 'ItemModule' in sigi:
+            items = sigi.get('ItemModule') or {}
+            item_struct = items.get(display_id) or (next(iter(items.values())) if items else None)
+            if item_struct:
+                return {
+                    'webapp.video-detail': {
+                        'statusCode': 0,
+                        'itemInfo': {'itemStruct': item_struct}
+                    }
+                }
+
+        # 3. Try __FRONTEND_CAST_DATA__
+        front = self._search_json(
+            r'<script[^>]+\bid="__FRONTEND_CAST_DATA__"[^>]*>', webpage,
+            'frontend cast data', display_id, end_pattern=r'</script>', default={}, fatal=False)
+        if front and isinstance(front, dict):
+            item_struct = traverse_obj(front, ('videoDetail', 'itemInfo', 'itemStruct', {dict})) or traverse_obj(front, ('itemInfo', 'itemStruct', {dict}))
+            if item_struct:
+                return {
+                    'webapp.video-detail': {
+                        'statusCode': 0,
+                        'itemInfo': {'itemStruct': item_struct}
+                    }
+                }
+
+        # 4. Try hydration-data / __NEXT_DATA__
+        hyd = self._search_json(
+            r'<script[^>]+\bid="(?:hydration-data|__NEXT_DATA__)"[^>]*>', webpage,
+            'hydration data', display_id, end_pattern=r'</script>', default={}, fatal=False)
+        if hyd and isinstance(hyd, dict):
+            item_struct = traverse_obj(hyd, ('itemInfo', 'itemStruct', {dict})) or traverse_obj(hyd, ('props', 'pageProps', 'itemInfo', 'itemStruct', {dict}))
+            if item_struct:
+                return {
+                    'webapp.video-detail': {
+                        'statusCode': 0,
+                        'itemInfo': {'itemStruct': item_struct}
+                    }
+                }
+
+        # 5. Direct Regex search for itemStruct object
+        item_m = re.search(r'"itemStruct"\s*:\s*(\{.+?\})\s*,\s*"(?:shareMeta|seller|status|location|author|music|video|stats)"', webpage)
+        if item_m:
+            try:
+                item_struct = json.loads(item_m.group(1))
+                if isinstance(item_struct, dict) and 'video' in item_struct:
+                    return {
+                        'webapp.video-detail': {
+                            'statusCode': 0,
+                            'itemInfo': {'itemStruct': item_struct}
+                        }
+                    }
+            except Exception:
+                pass
+
+        return univ_scope or {}
 
     def _call_api_impl(self, ep, video_id, query=None, data=None, headers=None, fatal=True,
                        note='Downloading API JSON', errnote='Unable to download API page'):
@@ -756,16 +823,26 @@ class TikTokIE(TikTokBaseIE):
                 self.report_warning(f'{e}; trying with webpage')
 
         url = self._create_url(user_id, video_id)
-        video_data, status = self._extract_web_data_and_status(url, video_id)
+        try:
+            video_data, status = self._extract_web_data_and_status(url, video_id)
+            if video_data and status == 0:
+                return self._parse_aweme_video_web(video_data, url, video_id)
+            elif status in (10216, 10222):
+                self.raise_login_required(
+                    'You do not have permission to view this post. Log into an account that has access')
+            elif status == 10204:
+                raise ExtractorError('Your IP address is blocked from accessing this post', expected=True)
+        except ExtractorError as web_err:
+            try:
+                return self._extract_aweme_app(video_id)
+            except Exception:
+                raise web_err
 
-        if video_data and status == 0:
-            return self._parse_aweme_video_web(video_data, url, video_id)
-        elif status in (10216, 10222):
-            # 10216: private post; 10222: private account
-            self.raise_login_required(
-                'You do not have permission to view this post. Log into an account that has access')
-        elif status == 10204:
-            raise ExtractorError('Your IP address is blocked from accessing this post', expected=True)
+        try:
+            return self._extract_aweme_app(video_id)
+        except Exception:
+            pass
+
         raise ExtractorError(f'Video not available, status code {status}', video_id=video_id)
 
 
