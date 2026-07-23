@@ -137,24 +137,36 @@ class TikTokBaseIE(InfoExtractor):
                     play_url = first.get('url') if isinstance(first, dict) else str(first)
 
                 images_converted = []
-                if image_post and 'images' in image_post:
-                    for img in image_post['images']:
-                        disp = img.get('displayImage', {}) or img.get('display_image', {})
-                        u_list = disp.get('imageURL', {}).get('urlList') or disp.get('url_list') or []
-                        if u_list:
-                            images_converted.append({'imageURL': {'urlList': u_list}})
+                raw_images = (image_post.get('displayImages') or image_post.get('images') or []) if isinstance(image_post, dict) else []
+                for img in raw_images:
+                    if not isinstance(img, dict):
+                        continue
+                    u_list = img.get('urlList') or img.get('url_list') or traverse_obj(img, ('displayImage', 'imageURL', 'urlList')) or traverse_obj(img, ('imageURL', 'urlList')) or []
+                    if u_list:
+                        images_converted.append({
+                            'imageURL': {'urlList': u_list},
+                            'imageWidth': img.get('width'),
+                            'imageHeight': img.get('height'),
+                        })
+
+                author_dict = {
+                    'id': author.get('userId') or author.get('id', ''),
+                    'authorId': author.get('userId') or author.get('id', ''),
+                    'uniqueId': author.get('uniqueId') or author.get('secUid', ''),
+                    'unique_id': author.get('uniqueId') or author.get('secUid', ''),
+                    'author': author.get('uniqueId') or author.get('secUid', ''),
+                    'nickname': author.get('nickName') or author.get('nickname', ''),
+                    'avatarThumb': (author.get('covers') or [author.get('avatar')])[0],
+                    'secUid': author.get('secUid', ''),
+                    'authorSecId': author.get('secUid', ''),
+                }
 
                 item_struct = {
                     'id': item.get('id'),
                     'desc': item.get('text', ''),
                     'createTime': item.get('createTime'),
-                    'author': {
-                        'id': author.get('id'),
-                        'uniqueId': author.get('uniqueId') or author.get('secUid', ''),
-                        'nickname': author.get('nickName', ''),
-                        'avatarThumb': author.get('avatar'),
-                        'secUid': author.get('secUid', ''),
-                    },
+                    'author': author_dict,
+                    'authorInfo': author_dict,
                     'video': {
                         'id': item.get('id'),
                         'duration': video_obj.get('duration'),
