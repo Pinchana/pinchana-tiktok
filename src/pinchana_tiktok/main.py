@@ -205,6 +205,7 @@ def _is_rate_limited(e: Exception) -> bool:
             "verify you are human",
             "captcha",
             "challenge",
+            "unable to extract universal data for rehydration",
             "timed out",
             "timeout",
             "connection reset",

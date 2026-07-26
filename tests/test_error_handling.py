@@ -39,7 +39,14 @@ async def test_login_gated_post_fails_once_without_vpn_rotation(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_rotates_once_and_retries_once(monkeypatch):
+@pytest.mark.parametrize(
+    "message",
+    [
+        "HTTP Error 429: Too Many Requests",
+        "[TikTok] 7663781221171776789: Unable to extract universal data for rehydration",
+    ],
+)
+async def test_rate_limit_rotates_once_and_retries_once(monkeypatch, message):
     attempts = 0
     rotations = 0
 
@@ -47,7 +54,7 @@ async def test_rate_limit_rotates_once_and_retries_once(monkeypatch):
         def extract_video(self, _url):
             nonlocal attempts
             attempts += 1
-            raise RuntimeError("HTTP Error 429: Too Many Requests")
+            raise RuntimeError(message)
 
     async def fake_rotation():
         nonlocal rotations
@@ -75,10 +82,13 @@ async def test_rate_limit_rotates_once_and_retries_once(monkeypatch):
         ("This video was removed", main.MediaNotFoundError),
         ("Unable to parse an unexpected response", main.ExtractionError),
         ("HTTP Error 403: Forbidden", main.RateLimitError),
+        (
+            "Unable to extract universal data for rehydration",
+            main.RateLimitError,
+        ),
     ],
 )
 def test_extractor_errors_are_classified_without_broad_unavailable_matching(
     message, exception_type
 ):
     assert isinstance(main._classify_extraction_error(RuntimeError(message)), exception_type)
-
