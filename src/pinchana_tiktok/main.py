@@ -10,7 +10,7 @@ from pinchana_core.models import ScrapeRequest, ScrapeResponse, MediaItem
 from pinchana_core.storage import MediaStorage
 from pinchana_core.plugins import ScraperPlugin, registry
 from pinchana_core.vpn import GluetunController, VpnRotationError
-from .api import TikTokScraper
+from .api import TikTokScraper, tiktok_session_cache
 from yt_dlp import YoutubeDL
 
 logging.basicConfig(level=logging.INFO)
@@ -481,6 +481,8 @@ async def _process_scrape_request(request: ScrapeRequest):
             if isinstance(classified, RateLimitError):
                 logger.warning("TikTok attempt %d was blocked for %s: %s", attempt, video_id, e)
                 if attempt < 2 and _vpn_enabled():
+                    tiktok_session_cache.clear()
+                    logger.info("Cleared TikTok session cache before the single retry.")
                     try:
                         await trigger_rotation()
                     except RateLimitError as rotation_error:

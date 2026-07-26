@@ -441,17 +441,6 @@ class TikTokBaseIE(InfoExtractor):
     def _extract_web_data_and_status(self, url, video_id, fatal=True):
         video_data, status = {}, -1
 
-        # Tier 1: Try Embed V2 page (100% unblocked on Datacenter IPs, no login/WAF challenges)
-        try:
-            embed_url = f'https://www.tiktok.com/embed/v2/{video_id}'
-            embed_webpage = self._download_webpage(embed_url, video_id, note='Downloading Embed V2 page', fatal=False, impersonate=True)
-            if embed_webpage:
-                frontity_data = self._parse_frontity_video_data(embed_webpage, video_id)
-                if frontity_data and traverse_obj(frontity_data, ('webapp.video-detail', 'itemInfo', 'itemStruct', {dict})):
-                    return traverse_obj(frontity_data, ('webapp.video-detail', 'itemInfo', 'itemStruct', {dict})), 0
-        except Exception as e:
-            self.report_warning(f'Embed V2 fetch failed for {video_id}: {e}')
-
         def get_webpage(note='Downloading webpage'):
             res = self._download_webpage_handle(url, video_id, note, fatal=fatal, impersonate=True)
             if res is False:
@@ -476,18 +465,36 @@ class TikTokBaseIE(InfoExtractor):
             try:
                 cookie_names = self._solve_challenge_and_set_cookies(webpage)
             except ExtractorError as e:
-                if fatal:
-                    raise
                 self.report_warning(e.orig_msg, video_id=video_id)
-                return video_data, status
+            else:
+                webpage = get_webpage(note='Downloading webpage with challenge cookie')
+                # Manually clear challenge cookies that should expire immediately after webpage request
+                for cookie_name in filter(None, cookie_names):
+                    self.cookiejar.clear(domain='.tiktok.com', path='/', name=cookie_name)
+                if webpage is False:
+                    return video_data, status
+                universal_data = self._get_universal_data(webpage, video_id)
 
-            webpage = get_webpage(note='Downloading webpage with challenge cookie')
-            # Manually clear challenge cookies that should expire immediately after webpage request
-            for cookie_name in filter(None, cookie_names):
-                self.cookiejar.clear(domain='.tiktok.com', path='/', name=cookie_name)
-            if webpage is False:
-                return video_data, status
-            universal_data = self._get_universal_data(webpage, video_id)
+        # Embed V2 is a reliable fallback for photo posts, but exposes only a
+        # watermarked download for regular videos. Trying it after the canonical
+        # page avoids an unnecessary request on the common video path.
+        if not universal_data:
+            try:
+                embed_url = f'https://www.tiktok.com/embed/v2/{video_id}'
+                embed_webpage = self._download_webpage(
+                    embed_url,
+                    video_id,
+                    note='Downloading Embed V2 fallback',
+                    fatal=False,
+                    impersonate=True,
+                )
+                if embed_webpage:
+                    universal_data = self._parse_frontity_video_data(
+                        embed_webpage,
+                        video_id,
+                    )
+            except Exception as e:
+                self.report_warning(f'Embed V2 fetch failed for {video_id}: {e}')
 
         if not universal_data:
             message = 'Unable to extract universal data for rehydration'
@@ -937,13 +944,6 @@ class TikTokIE(TikTokBaseIE):
                     video_id = m_red.group('id')
                     user_id = m_red.group('user_id')
                     url = redirected_url
-
-        if self._KNOWN_APP_INFO and video_id.isdigit():
-            try:
-                return self._extract_aweme_app(video_id)
-            except ExtractorError as e:
-                e.expected = True
-                self.report_warning(f'{e}; trying with webpage')
 
         url = self._create_url(user_id, video_id)
         try:

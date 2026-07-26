@@ -49,6 +49,7 @@ async def test_login_gated_post_fails_once_without_vpn_rotation(monkeypatch):
 async def test_rate_limit_rotates_once_and_retries_once(monkeypatch, message):
     attempts = 0
     rotations = 0
+    cache_clears = 0
 
     class Scraper:
         def extract_video(self, _url):
@@ -60,9 +61,14 @@ async def test_rate_limit_rotates_once_and_retries_once(monkeypatch, message):
         nonlocal rotations
         rotations += 1
 
+    def fake_clear_session_cache():
+        nonlocal cache_clears
+        cache_clears += 1
+
     monkeypatch.setenv("VPN_ENABLED", "1")
     monkeypatch.setattr(main, "TikTokScraper", Scraper)
     monkeypatch.setattr(main, "trigger_rotation", fake_rotation)
+    monkeypatch.setattr(main.tiktok_session_cache, "clear", fake_clear_session_cache)
     monkeypatch.setattr(main.storage, "is_cached", lambda _post_id: False)
 
     with pytest.raises(main.HTTPException) as exc_info:
@@ -74,6 +80,7 @@ async def test_rate_limit_rotates_once_and_retries_once(monkeypatch, message):
     assert exc_info.value.detail["code"] == "rate_limited"
     assert attempts == 2
     assert rotations == 1
+    assert cache_clears == 1
 
 
 @pytest.mark.parametrize(

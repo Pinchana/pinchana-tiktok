@@ -24,6 +24,7 @@ External clients should call the gateway's authenticated `POST /v1/scrape` route
 | --- | --- | --- |
 | `CACHE_PATH` | `./cache` | Base media cache path |
 | `CACHE_MAX_SIZE_GB` | `10.0` | Maximum cache size before eviction |
+| `TIKTOK_REQUEST_INTERVAL_SECONDS` | `0.5` | Delay between upstream requests to reduce burst-rate throttling |
 | `GLUETUN_CONTROL_URL` | `http://localhost:8000` | Private Gluetun control endpoint |
 
 ## Development
