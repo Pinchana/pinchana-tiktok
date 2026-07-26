@@ -128,7 +128,6 @@ class TikTokBaseIE(InfoExtractor):
                 image_post = vd.get('imagePostInfo', {})
 
                 video_obj = item.get('video', {})
-                urls = video_obj.get('urls', [])
                 covers = item.get('covers', [])
 
                 play_url = music.get('playUrl')
@@ -148,6 +147,12 @@ class TikTokBaseIE(InfoExtractor):
                             'imageWidth': img.get('width'),
                             'imageHeight': img.get('height'),
                         })
+
+                # Embed V2 exposes only TikTok's watermarked download for regular
+                # videos. It is still the most reliable source for photo posts,
+                # but must not short-circuit the canonical page for videos.
+                if not images_converted:
+                    return None
 
                 author_dict = {
                     'id': author.get('userId') or author.get('id', ''),
@@ -170,8 +175,6 @@ class TikTokBaseIE(InfoExtractor):
                     'video': {
                         'id': item.get('id'),
                         'duration': video_obj.get('duration'),
-                        'playAddr': urls[0] if urls else '',
-                        'downloadAddr': urls[0] if urls else '',
                         'cover': covers[0] if covers else '',
                         'dynamicCover': covers[1] if len(covers) > 1 else '',
                         'originCover': covers[-1] if covers else '',
@@ -204,7 +207,7 @@ class TikTokBaseIE(InfoExtractor):
         return None
 
     def _get_universal_data(self, webpage, display_id):
-        # 0. Try __FRONTITY_CONNECT_STATE__ (Embed V2 data)
+        # 0. Try __FRONTITY_CONNECT_STATE__ for photo posts.
         frontity_data = self._parse_frontity_video_data(webpage, display_id)
         if frontity_data:
             return frontity_data

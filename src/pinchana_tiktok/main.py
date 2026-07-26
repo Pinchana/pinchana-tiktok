@@ -23,6 +23,7 @@ storage = MediaStorage(
     max_size_gb=float(os.getenv("CACHE_MAX_SIZE_GB", "10.0")),
 )
 YTDLP_LIMIT = asyncio.Semaphore(max(1, int(os.getenv("YTDLP_CONCURRENCY", "2"))))
+TIKTOK_VIDEO_CACHE_VERSION = 1
 
 
 def _media_url_to_path(url: str | None):
@@ -43,6 +44,12 @@ def _media_url_to_path(url: str | None):
 
 def _cached_media_ready(metadata: dict) -> bool:
     if not isinstance(metadata, dict):
+        return False
+
+    if (
+        metadata.get("media_type") == "video"
+        and metadata.get("_tiktok_video_cache_version") != TIKTOK_VIDEO_CACHE_VERSION
+    ):
         return False
 
     urls: list[str] = []
@@ -151,6 +158,27 @@ class MediaNotFoundError(Exception):
 class ExtractionError(Exception):
     """Raised for unexpected extractor failures that must not be retried."""
     pass
+
+
+def _without_watermarked_formats(info: dict) -> dict:
+    formats = info.get("formats")
+    if not isinstance(formats, list):
+        raise ExtractionError("TikTok did not provide a watermark-free video format")
+
+    clean_formats = [
+        format_info
+        for format_info in formats
+        if "watermark" not in str(format_info.get("format_note") or "").lower()
+    ]
+    if not clean_formats:
+        raise ExtractionError("TikTok did not provide a watermark-free video format")
+
+    if len(clean_formats) != len(formats):
+        logger.info(
+            "Discarded %d watermarked TikTok format(s)",
+            len(formats) - len(clean_formats),
+        )
+    return {**info, "formats": clean_formats}
 
 
 async def trigger_rotation():
@@ -338,12 +366,26 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
 
     else:
         download_error = False
+        video_info = _without_watermarked_formats(info)
+        for stale_video in post_dir.glob("video.*"):
+            if stale_video.is_file():
+                stale_video.unlink()
         video_outtmpl = str(post_dir / "video.%(ext)s")
         video_ydl = _build_ydl(video_outtmpl, fmt="best[ext=mp4]/best", noplaylist=True, cookies_from=scraper._ydl)
         try:
-            await _download_with_ydl_bounded(video_ydl, info)
+            download_result = await _download_with_ydl_bounded(video_ydl, video_info)
+            logger.info(
+                "Selected watermark-free TikTok format id=%s codec=%s resolution=%sx%s",
+                download_result.get("format_id"),
+                download_result.get("vcodec"),
+                download_result.get("width"),
+                download_result.get("height"),
+            )
         except Exception as e:
             download_error = True
+            for incomplete_video in post_dir.glob("video.*"):
+                if incomplete_video.is_file():
+                    incomplete_video.unlink()
             logger.error("Video download failed: %s", e)
 
         thumb_outtmpl = {
@@ -359,7 +401,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
             cookies_from=scraper._ydl,
         )
         try:
-            await _download_with_ydl_bounded(thumb_ydl, info)
+            await _download_with_ydl_bounded(thumb_ydl, video_info)
         except Exception as e:
             download_error = True
             logger.error("Thumbnail download failed: %s", e)
@@ -393,6 +435,8 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
     metadata = response.model_dump()
     if audio_url:
         metadata["audio_url"] = audio_url
+    if media_type == "video":
+        metadata["_tiktok_video_cache_version"] = TIKTOK_VIDEO_CACHE_VERSION
     storage.save_metadata(video_id, metadata)
     return response
 
