@@ -70,6 +70,7 @@ async def test_rate_limit_rotates_once_and_retries_once(monkeypatch, message):
     monkeypatch.setattr(main, "trigger_rotation", fake_rotation)
     monkeypatch.setattr(main.tiktok_session_cache, "clear", fake_clear_session_cache)
     monkeypatch.setattr(main.storage, "is_cached", lambda _post_id: False)
+    monkeypatch.setattr(main, "_probe_oembed", lambda _url: _async_value("available"))
 
     with pytest.raises(main.HTTPException) as exc_info:
         await main._process_scrape_request(
@@ -91,7 +92,7 @@ async def test_rate_limit_rotates_once_and_retries_once(monkeypatch, message):
         ("HTTP Error 403: Forbidden", main.RateLimitError),
         (
             "Unable to extract universal data for rehydration",
-            main.RateLimitError,
+            main.ExtractionError,
         ),
     ],
 )
@@ -99,3 +100,57 @@ def test_extractor_errors_are_classified_without_broad_unavailable_matching(
     message, exception_type
 ):
     assert isinstance(main._classify_extraction_error(RuntimeError(message)), exception_type)
+
+
+async def _async_value(value):
+    return value
+
+
+@pytest.mark.asyncio
+async def test_transport_failure_retries_without_rotation(monkeypatch):
+    attempts = 0
+    rotations = 0
+
+    class Scraper:
+        def extract_video(self, _url):
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("Connection reset by peer")
+
+    async def fake_rotation():
+        nonlocal rotations
+        rotations += 1
+
+    monkeypatch.setattr(main, "TikTokScraper", Scraper)
+    monkeypatch.setattr(main, "trigger_rotation", fake_rotation)
+    monkeypatch.setattr(main.storage, "is_cached", lambda _post_id: False)
+    monkeypatch.setattr(main.asyncio, "sleep", lambda _delay: _async_value(None))
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main._process_scrape_request(
+            SimpleNamespace(url="https://www.tiktok.com/@creator/video/123456")
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["code"] == "upstream_unavailable"
+    assert attempts == 2
+    assert rotations == 0
+
+
+@pytest.mark.asyncio
+async def test_oembed_not_found_disambiguates_missing_web_data(monkeypatch):
+    class Scraper:
+        def extract_video(self, _url):
+            raise RuntimeError("Unable to extract universal data for rehydration")
+
+    monkeypatch.setattr(main, "TikTokScraper", Scraper)
+    monkeypatch.setattr(main.storage, "is_cached", lambda _post_id: False)
+    monkeypatch.setattr(main, "_probe_oembed", lambda _url: _async_value("not_found"))
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main._process_scrape_request(
+            SimpleNamespace(url="https://www.tiktok.com/@creator/video/123456")
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail["code"] == "not_found"

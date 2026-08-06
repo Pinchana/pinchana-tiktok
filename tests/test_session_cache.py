@@ -31,14 +31,9 @@ def _cookie(name="ttwid", value="session-value"):
     )
 
 
-def test_session_cache_reuses_cookies_device_id_and_request_pacing(monkeypatch):
-    device_ids = iter(("7250000000000000001", "7250000000000000002"))
-    monkeypatch.setattr(
-        TikTokSessionCache,
-        "_new_device_id",
-        staticmethod(lambda: next(device_ids)),
-    )
+def test_session_cache_reuses_cookies_without_mobile_identity(monkeypatch):
     monkeypatch.setenv("TIKTOK_REQUEST_INTERVAL_SECONDS", "0.75")
+    monkeypatch.setenv("TIKTOK_PROXY_URL", "http://proxy.example:8888")
     cache = TikTokSessionCache()
 
     first = TikTokScraper(session_cache=cache)
@@ -52,16 +47,14 @@ def test_session_cache_reuses_cookies_device_id_and_request_pacing(monkeypatch):
     }
     assert second_cookies[(".tiktok.com", "/", "ttwid")] == "session-value"
     assert second._ydl.params["sleep_interval_requests"] == 0.75
-    assert second._ydl.params["extractor_args"]["tiktok"]["device_id"] == [
-        "7250000000000000001"
-    ]
+    assert second._ydl.params["proxy"] == "http://proxy.example:8888"
+    assert "device_id" not in second._ydl.params["extractor_args"]["tiktok"]
+    assert "app_info" not in second._ydl.params["extractor_args"]["tiktok"]
 
     cache.clear()
     third = TikTokScraper(session_cache=cache)
     assert not list(third._ydl.cookiejar)
-    assert third._ydl.params["extractor_args"]["tiktok"]["device_id"] == [
-        "7250000000000000002"
-    ]
+    assert "device_id" not in third._ydl.params["extractor_args"]["tiktok"]
 
 
 def test_video_extraction_uses_web_before_app_api(monkeypatch):
@@ -93,27 +86,25 @@ def test_video_extraction_uses_web_before_app_api(monkeypatch):
     assert app_calls == 0
 
 
-def test_app_api_is_called_once_after_web_failure(monkeypatch):
+def test_mobile_app_api_is_never_called_after_web_failure(monkeypatch):
     ie = TikTokIE(YoutubeDL({"quiet": True}))
     app_calls = 0
 
     def fail_web(_url, _video_id):
         raise ExtractorError("Unable to extract universal data for rehydration")
 
-    def extract_app(video_id):
+    def extract_app(_video_id):
         nonlocal app_calls
         app_calls += 1
-        return {"id": video_id}
+        raise AssertionError("anonymous extraction must not call the mobile API")
 
     monkeypatch.setattr(ie, "_extract_web_data_and_status", fail_web)
     monkeypatch.setattr(ie, "_extract_aweme_app", extract_app)
 
-    result = ie._real_extract(
-        "https://www.tiktok.com/@creator/video/7663781221171776789"
-    )
+    with pytest.raises(ExtractorError, match="universal data"):
+        ie._real_extract("https://www.tiktok.com/@creator/video/7663781221171776789")
 
-    assert result == {"id": "7663781221171776789"}
-    assert app_calls == 1
+    assert app_calls == 0
 
 
 def test_embed_page_is_only_used_after_canonical_page_misses(monkeypatch):

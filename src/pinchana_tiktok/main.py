@@ -4,13 +4,21 @@ import asyncio
 import os
 import re
 import logging
+import time
 from pathlib import Path
+import httpx
 from fastapi import FastAPI, APIRouter, HTTPException
 from pinchana_core.models import ScrapeRequest, ScrapeResponse, MediaItem
 from pinchana_core.storage import MediaStorage
 from pinchana_core.plugins import ScraperPlugin, registry
-from pinchana_core.vpn import GluetunController, VpnRotationError
-from .api import TikTokScraper, tiktok_session_cache
+from pinchana_core.vpn import GluetunController
+from .api import (
+    TikTokScraper,
+    proxy_url,
+    request_interval_seconds,
+    tiktok_session_cache,
+    transport_ydl_opts,
+)
 from yt_dlp import YoutubeDL
 
 logging.basicConfig(level=logging.INFO)
@@ -22,8 +30,32 @@ storage = MediaStorage(
     base_path=os.getenv("CACHE_PATH", "./cache"),
     max_size_gb=float(os.getenv("CACHE_MAX_SIZE_GB", "10.0")),
 )
-YTDLP_LIMIT = asyncio.Semaphore(max(1, int(os.getenv("YTDLP_CONCURRENCY", "2"))))
 TIKTOK_VIDEO_CACHE_VERSION = 1
+
+
+class TikTokUpstreamRunner:
+    """Bound blocking yt-dlp work and pace starts across all requests."""
+
+    def __init__(self, concurrency: int, interval: float):
+        self._limit = asyncio.Semaphore(max(1, concurrency))
+        self._pace_lock = asyncio.Lock()
+        self._interval = max(0.0, interval)
+        self._last_started = 0.0
+
+    async def run(self, function, *args):
+        async with self._limit:
+            async with self._pace_lock:
+                delay = self._interval - (time.monotonic() - self._last_started)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                self._last_started = time.monotonic()
+            return await asyncio.to_thread(function, *args)
+
+
+UPSTREAM_RUNNER = TikTokUpstreamRunner(
+    int(os.getenv("YTDLP_CONCURRENCY", "2")),
+    request_interval_seconds(),
+)
 
 
 def _media_url_to_path(url: str | None):
@@ -92,6 +124,7 @@ def _build_ydl(
     opts: dict = {
         "quiet": True,
         "no_warnings": True,
+        **transport_ydl_opts(),
         "outtmpl": outtmpl,
         "noplaylist": noplaylist,
         "overwrites": True,
@@ -136,8 +169,7 @@ def _download_with_ydl(ydl: YoutubeDL, info: dict) -> dict:
 
 
 async def _download_with_ydl_bounded(ydl: YoutubeDL, info: dict) -> dict:
-    async with YTDLP_LIMIT:
-        return await asyncio.to_thread(_download_with_ydl, ydl, info)
+    return await UPSTREAM_RUNNER.run(_download_with_ydl, ydl, info)
 
 
 class RateLimitError(Exception):
@@ -157,6 +189,11 @@ class MediaNotFoundError(Exception):
 
 class ExtractionError(Exception):
     """Raised for unexpected extractor failures that must not be retried."""
+    pass
+
+
+class UpstreamUnavailableError(Exception):
+    """Raised for temporary network failures that should retry on the same egress."""
     pass
 
 
@@ -186,38 +223,21 @@ async def trigger_rotation():
     logger.warning("Rotating VPN IP...")
     try:
         await gluetun.rotate_ip()
-    except VpnRotationError as e:
+    except Exception as e:
         logger.warning(f"VPN rotation failed: {e}")
         raise RateLimitError(str(e))
-
-
-def _is_rate_limited(e: Exception) -> bool:
-    """Check if an exception indicates rate-limiting or IP blocking."""
-    msg = str(e).lower()
-    return any(
-        x in msg
-        for x in (
-            "blocked",
-            "403",
-            "429",
-            "rate limit",
-            "too many requests",
-            "verify you are human",
-            "captcha",
-            "challenge",
-            "unable to extract universal data for rehydration",
-            "timed out",
-            "timeout",
-            "connection reset",
-            "connection refused",
-        )
-    )
 
 
 def _classify_extraction_error(error: Exception) -> Exception:
     if isinstance(
         error,
-        (AuthenticationRequiredError, MediaNotFoundError, RateLimitError, ExtractionError),
+        (
+            AuthenticationRequiredError,
+            MediaNotFoundError,
+            RateLimitError,
+            ExtractionError,
+            UpstreamUnavailableError,
+        ),
     ):
         return error
 
@@ -234,6 +254,8 @@ def _classify_extraction_error(error: Exception) -> Exception:
             "cookies for the authentication",
             "private video",
             "private post",
+            "private account",
+            "permission to view this post",
         )
     ):
         return AuthenticationRequiredError(message)
@@ -249,9 +271,73 @@ def _classify_extraction_error(error: Exception) -> Exception:
         )
     ):
         return MediaNotFoundError(message)
-    if _is_rate_limited(error):
+    if any(
+        marker in lowered
+        for marker in (
+            "http error 403",
+            "http error 429",
+            "status code 403",
+            "status code 429",
+            "too many requests",
+            "rate limit",
+            "ip address is blocked",
+            "verify you are human",
+            "unable to solve js challenge",
+        )
+    ):
         return RateLimitError(message)
+    if any(
+        marker in lowered
+        for marker in (
+            "timed out",
+            "timeout",
+            "connection reset",
+            "connection refused",
+            "connection aborted",
+            "temporary failure",
+            "name or service not known",
+            "network is unreachable",
+        )
+    ):
+        return UpstreamUnavailableError(message)
     return ExtractionError(message)
+
+
+def _needs_oembed_probe(error: Exception) -> bool:
+    lowered = str(error).lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "unable to extract universal data for rehydration",
+            "unexpected response from webpage request",
+            "unable to extract challenge data",
+            "video not available, status code",
+        )
+    )
+
+
+def _probe_oembed_sync(url: str) -> str:
+    """Return available, not_found, blocked, or unknown for an official probe."""
+    try:
+        with httpx.Client(
+            proxy=proxy_url(),
+            timeout=10.0,
+            follow_redirects=True,
+        ) as client:
+            response = client.get("https://www.tiktok.com/oembed", params={"url": url})
+        if response.status_code == 200 and isinstance(response.json(), dict):
+            return "available"
+        if response.status_code in (404, 410):
+            return "not_found"
+        if response.status_code in (403, 429):
+            return "blocked"
+    except (httpx.HTTPError, ValueError):
+        pass
+    return "unknown"
+
+
+async def _probe_oembed(url: str) -> str:
+    return await UPSTREAM_RUNNER.run(_probe_oembed_sync, url)
 
 
 def _vpn_enabled() -> bool:
@@ -287,6 +373,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
 
     if media_type == "playlist":
         download_error = False
+        first_download_error = None
         image_dir = post_dir / "images"
         image_dir.mkdir(parents=True, exist_ok=True)
 
@@ -317,6 +404,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
                 await _download_with_ydl_bounded(image_ydl, image_info)
             except Exception as e:
                 download_error = True
+                first_download_error = first_download_error or e
                 logger.error("Image download failed: %s", e)
 
             image_files = sorted(p for p in image_dir.glob("*.*") if p.is_file())
@@ -351,6 +439,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
                 await _download_with_ydl_bounded(audio_ydl, audio_entry)
             except Exception as e:
                 download_error = True
+                first_download_error = first_download_error or e
                 logger.error("Audio download failed: %s", e)
 
         audio_file = post_dir / "audio.mp3"
@@ -363,10 +452,11 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
         media_type = "carousel"
 
         if download_error and not carousel_items and not audio_url:
-            raise HTTPException(status_code=503, detail="Media download failed")
+            raise first_download_error or ExtractionError("TikTok media download failed")
 
     else:
         download_error = False
+        first_download_error = None
         video_info = _without_watermarked_formats(info)
         for stale_video in post_dir.glob("video.*"):
             if stale_video.is_file():
@@ -384,6 +474,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
             )
         except Exception as e:
             download_error = True
+            first_download_error = first_download_error or e
             for incomplete_video in post_dir.glob("video.*"):
                 if incomplete_video.is_file():
                     incomplete_video.unlink()
@@ -405,6 +496,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
             await _download_with_ydl_bounded(thumb_ydl, video_info)
         except Exception as e:
             download_error = True
+            first_download_error = first_download_error or e
             logger.error("Thumbnail download failed: %s", e)
 
         video_file = _find_downloaded_file(post_dir, "video")
@@ -420,7 +512,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
         media_type = "video"
 
         if download_error and not video_url:
-            raise HTTPException(status_code=503, detail="Media download failed")
+            raise first_download_error or ExtractionError("TikTok media download failed")
 
     response = ScrapeResponse(
         shortcode=video_id,
@@ -450,7 +542,7 @@ async def _process_scrape_request(request: ScrapeRequest):
         scraper = TikTokScraper()
         try:
             if "vm.tiktok.com" in url or "vt.tiktok.com" in url or re.search(r"v[a-z]\.tiktok\.com", url) or "/t/" in url:
-                url = scraper.resolve_short_url(url)
+                url = await UPSTREAM_RUNNER.run(scraper.resolve_short_url, url)
 
             if video_id is None:
                 video_id = extract_video_id(url)
@@ -463,12 +555,19 @@ async def _process_scrape_request(request: ScrapeRequest):
                 logger.info("Cache invalid for %s, missing media; re-scraping", video_id)
 
             logger.info(f"Scraping TikTok: {video_id} (attempt {attempt})")
-            info = scraper.extract_video(url)
+            info = await UPSTREAM_RUNNER.run(scraper.extract_video, url)
             return await _download_and_build_response(video_id, info, scraper)
         except HTTPException:
             raise
         except Exception as e:
             classified = _classify_extraction_error(e)
+            if isinstance(classified, ExtractionError) and _needs_oembed_probe(e):
+                probe_result = await _probe_oembed(url)
+                logger.info("TikTok oEmbed diagnostic for %s: %s", video_id, probe_result)
+                if probe_result == "not_found":
+                    classified = MediaNotFoundError(str(e))
+                elif probe_result in ("available", "blocked"):
+                    classified = RateLimitError(str(e))
             if isinstance(classified, AuthenticationRequiredError):
                 logger.info("TikTok post %s requires anonymous access confirmation", video_id)
                 raise _http_error(
@@ -494,6 +593,21 @@ async def _process_scrape_request(request: ScrapeRequest):
                 raise _http_error(
                     503, "rate_limited", "TikTok is temporarily rate limited"
                 ) from e
+            if isinstance(classified, UpstreamUnavailableError):
+                logger.warning(
+                    "TikTok attempt %d had a temporary upstream failure for %s: %s",
+                    attempt,
+                    video_id,
+                    e,
+                )
+                if attempt < 2:
+                    await asyncio.sleep(max(0.5, request_interval_seconds()))
+                    continue
+                raise _http_error(
+                    503,
+                    "upstream_unavailable",
+                    "TikTok is temporarily unavailable",
+                ) from e
 
             logger.exception("TikTok extraction failed for %s: %s", video_id, e)
             raise _http_error(502, "extraction_failed", "TikTok extraction failed") from e
@@ -514,7 +628,19 @@ async def health_check():
         vpn_status = status.get("status", "").lower()
         if gluetun.enabled and vpn_status != "running":
             raise HTTPException(status_code=503, detail=f"VPN not running: {vpn_status}")
-        return {"status": "healthy", "service": "tiktok", "vpn": status}
+        egress_mode = (
+            "proxy"
+            if proxy_url()
+            else "vpn_namespace"
+            if gluetun.enabled
+            else "direct"
+        )
+        return {
+            "status": "healthy",
+            "service": "tiktok",
+            "vpn": status,
+            "egress_mode": egress_mode,
+        }
     except HTTPException:
         raise
     except Exception as e:

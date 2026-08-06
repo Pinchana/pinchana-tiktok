@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import os
-import random
 import threading
 import time
 from http.cookiejar import Cookie
@@ -21,22 +20,28 @@ DEFAULT_YDL_OPTS = {
 }
 
 
+def request_interval_seconds() -> float:
+    return max(0.0, float(os.getenv("TIKTOK_REQUEST_INTERVAL_SECONDS", "0.5")))
+
+
+def proxy_url() -> str | None:
+    return os.getenv("TIKTOK_PROXY_URL", "").strip() or None
+
+
+def transport_ydl_opts() -> dict:
+    """Options shared by extraction and every media download request."""
+    options = {"sleep_interval_requests": request_interval_seconds()}
+    if configured_proxy := proxy_url():
+        options["proxy"] = configured_proxy
+    return options
+
+
 class TikTokSessionCache:
-    """Reuse TikTok's anonymous cookies and device identity between scrapes."""
+    """Reuse TikTok's short-lived anonymous cookies between scrapes."""
 
     def __init__(self):
         self._lock = threading.RLock()
         self._cookies: dict[tuple[str, str, str], Cookie] = {}
-        self._device_id = self._new_device_id()
-
-    @staticmethod
-    def _new_device_id() -> str:
-        return str(random.randint(7250000000000000000, 7325099899999994577))
-
-    @property
-    def device_id(self) -> str:
-        with self._lock:
-            return self._device_id
 
     def restore(self, ydl: YoutubeDL) -> None:
         now = time.time()
@@ -62,10 +67,9 @@ class TikTokSessionCache:
                     self._cookies[key] = copy.copy(cookie)
 
     def clear(self) -> None:
-        """Drop cookies tied to the old IP and rotate the anonymous device ID."""
+        """Drop anonymous cookies tied to an old egress IP."""
         with self._lock:
             self._cookies.clear()
-            self._device_id = self._new_device_id()
 
 
 tiktok_session_cache = TikTokSessionCache()
@@ -80,20 +84,19 @@ class TikTokScraper:
         session_cache: TikTokSessionCache = tiktok_session_cache,
         **ydl_opts,
     ):
-        request_interval = max(
-            0.0,
-            float(os.getenv("TIKTOK_REQUEST_INTERVAL_SECONDS", "0.5")),
-        )
         extractor_args = {
             key: dict(value)
             for key, value in ydl_opts.pop("extractor_args", {}).items()
         }
+        # Pinchana's public scraper is intentionally anonymous and web-only.
+        # Do not let internal callers accidentally opt into the mobile API.
         tiktok_args = extractor_args.setdefault("tiktok", {})
-        tiktok_args.setdefault("device_id", [session_cache.device_id])
+        tiktok_args.pop("device_id", None)
+        tiktok_args.pop("app_info", None)
         self._session_cache = session_cache
         self._ydl_opts = {
             **DEFAULT_YDL_OPTS,
-            "sleep_interval_requests": request_interval,
+            **transport_ydl_opts(),
             "extractor_args": extractor_args,
             **ydl_opts,
         }
