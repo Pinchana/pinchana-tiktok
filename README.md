@@ -25,7 +25,10 @@ External clients should call the gateway's authenticated `POST /v1/scrape` route
 | --- | --- | --- |
 | `CACHE_PATH` | `./cache` | Base media cache path |
 | `CACHE_MAX_SIZE_GB` | `10.0` | Maximum cache size before eviction |
-| `TIKTOK_REQUEST_INTERVAL_SECONDS` | `0.5` | Delay between upstream requests to reduce burst-rate throttling |
+| `YTDLP_CONCURRENCY` | `1` | Maximum concurrent yt-dlp operations |
+| `TIKTOK_REQUEST_INTERVAL_SECONDS` | `2.0` | Minimum delay between upstream request starts |
+| `TIKTOK_RETRY_DELAY_SECONDS` | `2.0` | Delay before retrying a web challenge with a fresh anonymous session |
+| `TIKTOK_VPN_ROTATION_COOLDOWN_SECONDS` | `30` | Minimum delay between TikTok-triggered Gluetun reconnects |
 | `TIKTOK_PROXY_URL` | empty | Optional HTTP/SOCKS proxy applied to extraction and every media download |
 | `GLUETUN_CONTROL_URL` | `http://localhost:8000` | Private Gluetun control endpoint |
 

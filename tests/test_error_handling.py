@@ -40,13 +40,19 @@ async def test_login_gated_post_fails_once_without_vpn_rotation(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "message",
+    ("message", "expected_attempts", "expected_cache_clears"),
     [
-        "HTTP Error 429: Too Many Requests",
-        "[TikTok] 7663781221171776789: Unable to extract universal data for rehydration",
+        ("HTTP Error 429: Too Many Requests", 2, 1),
+        (
+            "[TikTok] 7663781221171776789: Unable to extract universal data for rehydration",
+            3,
+            2,
+        ),
     ],
 )
-async def test_rate_limit_rotates_once_and_retries_once(monkeypatch, message):
+async def test_rate_limit_retries_fresh_session_then_reconnects_once(
+    monkeypatch, message, expected_attempts, expected_cache_clears
+):
     attempts = 0
     rotations = 0
     cache_clears = 0
@@ -66,6 +72,7 @@ async def test_rate_limit_rotates_once_and_retries_once(monkeypatch, message):
         cache_clears += 1
 
     monkeypatch.setenv("VPN_ENABLED", "1")
+    monkeypatch.setenv("TIKTOK_RETRY_DELAY_SECONDS", "0")
     monkeypatch.setattr(main, "TikTokScraper", Scraper)
     monkeypatch.setattr(main, "trigger_rotation", fake_rotation)
     monkeypatch.setattr(main.tiktok_session_cache, "clear", fake_clear_session_cache)
@@ -79,9 +86,48 @@ async def test_rate_limit_rotates_once_and_retries_once(monkeypatch, message):
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail["code"] == "rate_limited"
-    assert attempts == 2
+    assert attempts == expected_attempts
     assert rotations == 1
-    assert cache_clears == 1
+    assert cache_clears == expected_cache_clears
+
+
+@pytest.mark.asyncio
+async def test_challenge_failure_retries_fresh_session_before_vpn(monkeypatch):
+    attempts = 0
+    rotations = 0
+
+    class Scraper:
+        def extract_video(self, _url):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError(
+                    "Unable to extract universal data for rehydration"
+                )
+            return {"id": "123456"}
+
+    async def fake_rotation():
+        nonlocal rotations
+        rotations += 1
+
+    async def fake_build_response(_video_id, info, _scraper):
+        return info
+
+    monkeypatch.setenv("VPN_ENABLED", "1")
+    monkeypatch.setenv("TIKTOK_RETRY_DELAY_SECONDS", "0")
+    monkeypatch.setattr(main, "TikTokScraper", Scraper)
+    monkeypatch.setattr(main, "trigger_rotation", fake_rotation)
+    monkeypatch.setattr(main, "_download_and_build_response", fake_build_response)
+    monkeypatch.setattr(main.storage, "is_cached", lambda _post_id: False)
+    monkeypatch.setattr(main, "_probe_oembed", lambda _url: _async_value("available"))
+
+    result = await main._process_scrape_request(
+        SimpleNamespace(url="https://www.tiktok.com/@creator/video/123456")
+    )
+
+    assert result == {"id": "123456"}
+    assert attempts == 2
+    assert rotations == 0
 
 
 @pytest.mark.parametrize(
@@ -154,3 +200,24 @@ async def test_oembed_not_found_disambiguates_missing_web_data(monkeypatch):
 
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail["code"] == "not_found"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://www.tiktok.com/@creator/video/7663781221171776789?_r=1&_t=tracking",
+            "https://www.tiktok.com/@creator/video/7663781221171776789",
+        ),
+        (
+            "https://m.tiktok.com/@creator/photo/7663781221171776789#share",
+            "https://www.tiktok.com/@creator/photo/7663781221171776789",
+        ),
+        (
+            "https://www.tiktok.com/v/7663781221171776789?lang=en",
+            "https://www.tiktok.com/@_/video/7663781221171776789",
+        ),
+    ],
+)
+def test_canonicalize_tiktok_url_removes_tracking_data(url, expected):
+    assert main.canonicalize_tiktok_url(url) == expected

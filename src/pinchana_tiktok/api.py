@@ -21,7 +21,7 @@ DEFAULT_YDL_OPTS = {
 
 
 def request_interval_seconds() -> float:
-    return max(0.0, float(os.getenv("TIKTOK_REQUEST_INTERVAL_SECONDS", "0.5")))
+    return max(0.0, float(os.getenv("TIKTOK_REQUEST_INTERVAL_SECONDS", "2.0")))
 
 
 def proxy_url() -> str | None:

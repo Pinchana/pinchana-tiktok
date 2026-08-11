@@ -5,7 +5,9 @@ import os
 import re
 import logging
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 import httpx
 from fastapi import FastAPI, APIRouter, HTTPException
 from pinchana_core.models import ScrapeRequest, ScrapeResponse, MediaItem
@@ -20,12 +22,17 @@ from .api import (
     transport_ydl_opts,
 )
 from yt_dlp import YoutubeDL
+from yt_dlp.version import __version__ as YTDLP_VERSION
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-gluetun = GluetunController()
+gluetun = GluetunController(
+    rotation_cooldown=float(
+        os.getenv("TIKTOK_VPN_ROTATION_COOLDOWN_SECONDS", "30")
+    )
+)
 storage = MediaStorage(
     base_path=os.getenv("CACHE_PATH", "./cache"),
     max_size_gb=float(os.getenv("CACHE_MAX_SIZE_GB", "10.0")),
@@ -53,9 +60,10 @@ class TikTokUpstreamRunner:
 
 
 UPSTREAM_RUNNER = TikTokUpstreamRunner(
-    int(os.getenv("YTDLP_CONCURRENCY", "2")),
+    int(os.getenv("YTDLP_CONCURRENCY", "1")),
     request_interval_seconds(),
 )
+TIKTOK_MAX_ATTEMPTS = 4
 
 
 def _media_url_to_path(url: str | None):
@@ -219,12 +227,12 @@ def _without_watermarked_formats(info: dict) -> dict:
 
 
 async def trigger_rotation():
-    """Trigger VPN IP rotation."""
-    logger.warning("Rotating VPN IP...")
+    """Reconnect the VPN tunnel after TikTok blocks the current session."""
+    logger.warning("Reconnecting VPN tunnel...")
     try:
-        await gluetun.rotate_ip()
+        await gluetun.rotate_ip(wait_for_cooldown=True)
     except Exception as e:
-        logger.warning(f"VPN rotation failed: {e}")
+        logger.warning(f"VPN reconnect failed: {e}")
         raise RateLimitError(str(e))
 
 
@@ -341,7 +349,14 @@ async def _probe_oembed(url: str) -> str:
 
 
 def _vpn_enabled() -> bool:
-    return os.getenv("VPN_ENABLED", "true").lower() in ("1", "true", "yes")
+    return (
+        not proxy_url()
+        and os.getenv("VPN_ENABLED", "true").lower() in ("1", "true", "yes")
+    )
+
+
+def _retry_delay_seconds() -> float:
+    return max(0.0, float(os.getenv("TIKTOK_RETRY_DELAY_SECONDS", "2.0")))
 
 
 def _http_error(status_code: int, code: str, message: str) -> HTTPException:
@@ -353,6 +368,30 @@ def extract_video_id(url: str) -> str:
     if match:
         return match.group(1)
     return url
+
+
+def canonicalize_tiktok_url(url: str) -> str:
+    """Strip tracking data and produce a stable canonical TikTok post URL."""
+    parsed = urlsplit(str(url))
+    hostname = (parsed.hostname or "").lower()
+    if hostname != "tiktok.com" and not hostname.endswith(".tiktok.com"):
+        return str(url)
+
+    canonical = re.search(
+        r"/@(?P<user>[\w.-]+)/(?P<kind>video|photo)/(?P<id>\d+)",
+        parsed.path,
+    )
+    if canonical:
+        return (
+            f"https://www.tiktok.com/@{canonical.group('user')}/"
+            f"{canonical.group('kind')}/{canonical.group('id')}"
+        )
+
+    legacy = re.search(r"/(?P<kind>v|video|photo)/(?P<id>\d+)", parsed.path)
+    if legacy:
+        kind = "photo" if legacy.group("kind") == "photo" else "video"
+        return f"https://www.tiktok.com/@_/{kind}/{legacy.group('id')}"
+    return str(url)
 
 
 async def _download_and_build_response(video_id: str, info: dict, scraper: TikTokScraper) -> ScrapeResponse:
@@ -535,14 +574,18 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
 
 
 async def _process_scrape_request(request: ScrapeRequest):
-    url = str(request.url)
+    url = canonicalize_tiktok_url(str(request.url))
     video_id = None
+    same_egress_retry_used = False
+    vpn_reconnect_used = False
+    transport_retry_used = False
 
-    for attempt in range(1, 3):
+    for attempt in range(1, TIKTOK_MAX_ATTEMPTS + 1):
         scraper = TikTokScraper()
         try:
             if "vm.tiktok.com" in url or "vt.tiktok.com" in url or re.search(r"v[a-z]\.tiktok\.com", url) or "/t/" in url:
                 url = await UPSTREAM_RUNNER.run(scraper.resolve_short_url, url)
+                url = canonicalize_tiktok_url(url)
 
             if video_id is None:
                 video_id = extract_video_id(url)
@@ -579,13 +622,26 @@ async def _process_scrape_request(request: ScrapeRequest):
                 raise _http_error(404, "not_found", "TikTok post not found") from e
             if isinstance(classified, RateLimitError):
                 logger.warning("TikTok attempt %d was blocked for %s: %s", attempt, video_id, e)
-                if attempt < 2 and _vpn_enabled():
+                challenge_failure = _needs_oembed_probe(e)
+                if challenge_failure and not same_egress_retry_used:
+                    same_egress_retry_used = True
                     tiktok_session_cache.clear()
-                    logger.info("Cleared TikTok session cache before the single retry.")
+                    delay = _retry_delay_seconds()
+                    logger.info(
+                        "Cleared TikTok session cache; retrying once on the current "
+                        "egress after %.1fs.",
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                if not vpn_reconnect_used and _vpn_enabled():
+                    vpn_reconnect_used = True
+                    tiktok_session_cache.clear()
+                    logger.info("Cleared TikTok session cache before VPN reconnect.")
                     try:
                         await trigger_rotation()
                     except RateLimitError as rotation_error:
-                        logger.warning("TikTok VPN rotation failed: %s", rotation_error)
+                        logger.warning("TikTok VPN reconnect failed: %s", rotation_error)
                         raise _http_error(
                             503, "rate_limited", "TikTok is temporarily rate limited"
                         ) from rotation_error
@@ -600,7 +656,8 @@ async def _process_scrape_request(request: ScrapeRequest):
                     video_id,
                     e,
                 )
-                if attempt < 2:
+                if not transport_retry_used:
+                    transport_retry_used = True
                     await asyncio.sleep(max(0.5, request_interval_seconds()))
                     continue
                 raise _http_error(
@@ -638,6 +695,7 @@ async def health_check():
         return {
             "status": "healthy",
             "service": "tiktok",
+            "yt_dlp_version": YTDLP_VERSION,
             "vpn": status,
             "egress_mode": egress_mode,
         }
@@ -654,11 +712,15 @@ registry.register(ScraperPlugin(
     route_patterns=["tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "v*.tiktok.com"],
 ))
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Release the shared storage client when the standalone app stops."""
+    try:
+        yield
+    finally:
+        await storage.close()
+
+
 # Standalone FastAPI app for container mode
-app = FastAPI(title="Pinchana TikTok", version="0.1.0")
+app = FastAPI(title="Pinchana TikTok", version="0.1.0", lifespan=lifespan)
 app.include_router(router)
-
-
-@app.on_event("shutdown")
-async def close_storage_client():
-    await storage.close()
