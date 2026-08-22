@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import threading
 import time
 from http.cookiejar import Cookie
@@ -114,9 +115,13 @@ class TikTokScraper:
             For photo slideshows the dict will have ``_type: "playlist"``
             with image entries.
         """
+        # Upstream TikTokIE owns URL routing, including /share/video URLs.  A
+        # photo post is served by the same canonical video endpoint, so only
+        # normalize that Pinchana-specific spelling before handing it over.
+        extractor_url = re.sub(r"(/@[\w.-]*/|/share/)photo/", r"\1video/", url)
         ie = TikTokIE(self._ydl)
         try:
-            info = ie.extract(url)
+            info = ie.extract(extractor_url)
         finally:
             self._session_cache.capture(self._ydl)
         # yt-dlp expects these fields when the info dict is later passed

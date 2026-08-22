@@ -1,11 +1,12 @@
 """TikTok scraper plugin — mounts as a FastAPI router."""
 
 import asyncio
+import copy
 import os
 import re
 import logging
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 import httpx
@@ -19,9 +20,9 @@ from .api import (
     proxy_url,
     request_interval_seconds,
     tiktok_session_cache,
-    transport_ydl_opts,
 )
 from yt_dlp import YoutubeDL
+from yt_dlp.postprocessor.ffmpeg import FFmpegExtractAudioPP
 from yt_dlp.version import __version__ as YTDLP_VERSION
 
 logging.basicConfig(level=logging.INFO)
@@ -119,43 +120,56 @@ def _cached_media_ready(metadata: dict) -> bool:
     return True
 
 
-def _build_ydl(
+def _download_options(
     outtmpl: dict | str,
     *,
     fmt: str | None = None,
     write_thumbnail: bool = False,
     skip_download: bool = False,
     noplaylist: bool = False,
-    extract_audio_mp3: bool = False,
-    cookies_from: YoutubeDL | None = None,
-) -> YoutubeDL:
-    opts: dict = {
-        "quiet": True,
-        "no_warnings": True,
-        **transport_ydl_opts(),
-        "outtmpl": outtmpl,
+) -> dict:
+    options: dict = {
+        "outtmpl": outtmpl if isinstance(outtmpl, dict) else {"default": outtmpl},
         "noplaylist": noplaylist,
         "overwrites": True,
         "retries": 2,
         "fragment_retries": 2,
+        "writethumbnail": write_thumbnail,
+        "skip_download": skip_download,
     }
     if fmt:
-        opts["format"] = fmt
-    if write_thumbnail:
-        opts["writethumbnail"] = True
-    if skip_download:
-        opts["skip_download"] = True
+        options["format"] = fmt
+    return options
+
+
+@contextmanager
+def _temporary_ydl_configuration(
+    ydl: YoutubeDL,
+    options: dict,
+    *,
+    extract_audio_mp3: bool = False,
+):
+    """Apply download options without replacing the extraction session."""
+    original_params = ydl.params.copy()
+    original_postprocessors = {
+        stage: list(postprocessors)
+        for stage, postprocessors in ydl._pps.items()
+    }
+    ydl.params.update(options)
     if extract_audio_mp3:
-        opts["postprocessors"] = [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }]
-    ydl = YoutubeDL(opts)
-    if cookies_from:
-        for cookie in cookies_from.cookiejar:
-            ydl.cookiejar.set_cookie(cookie)
-    return ydl
+        ydl.add_post_processor(
+            FFmpegExtractAudioPP(
+                ydl,
+                preferredcodec="mp3",
+                preferredquality="192",
+            )
+        )
+    try:
+        yield
+    finally:
+        ydl.params.clear()
+        ydl.params.update(original_params)
+        ydl._pps = original_postprocessors
 
 
 def _find_downloaded_file(base_dir: Path, prefix: str) -> Path | None:
@@ -171,13 +185,35 @@ def _replace_file(src: Path, dest: Path) -> Path:
     return dest
 
 
-def _download_with_ydl(ydl: YoutubeDL, info: dict) -> dict:
-    result = ydl.process_ie_result(info, download=True)
-    return ydl.sanitize_info(result)
+def _download_with_ydl(
+    ydl: YoutubeDL,
+    info: dict,
+    options: dict,
+    extract_audio_mp3: bool = False,
+) -> dict:
+    with _temporary_ydl_configuration(
+        ydl,
+        options,
+        extract_audio_mp3=extract_audio_mp3,
+    ):
+        result = ydl.process_ie_result(info, download=True)
+        return ydl.sanitize_info(result)
 
 
-async def _download_with_ydl_bounded(ydl: YoutubeDL, info: dict) -> dict:
-    return await UPSTREAM_RUNNER.run(_download_with_ydl, ydl, info)
+async def _download_with_ydl_bounded(
+    scraper: TikTokScraper,
+    info: dict,
+    options: dict,
+    *,
+    extract_audio_mp3: bool = False,
+) -> dict:
+    return await UPSTREAM_RUNNER.run(
+        _download_with_ydl,
+        scraper._ydl,
+        info,
+        options,
+        extract_audio_mp3,
+    )
 
 
 class RateLimitError(Exception):
@@ -203,6 +239,67 @@ class ExtractionError(Exception):
 class UpstreamUnavailableError(Exception):
     """Raised for temporary network failures that should retry on the same egress."""
     pass
+
+
+class TikTokRequestError(Exception):
+    """Attach request-stage context while retaining the original yt-dlp error."""
+
+    def __init__(
+        self,
+        stage: str,
+        cause: Exception,
+        *,
+        url: str | None = None,
+        format_id: str | None = None,
+    ):
+        super().__init__(str(cause))
+        self.stage = stage
+        self.cause = cause
+        self.host = urlsplit(url).hostname if url else None
+        self.format_id = format_id
+        status = re.search(
+            r"(?:HTTP Error|status(?: code)?)[ :]*(403|404|429)\b",
+            str(cause),
+            re.I,
+        )
+        self.status_code = int(status.group(1)) if status else None
+
+
+MEDIA_DOWNLOAD_STAGES = {
+    "video_download",
+    "photo_download",
+    "audio_download",
+    "thumbnail",
+}
+
+
+def _request_error(
+    stage: str,
+    error: Exception,
+    *,
+    url: str | None = None,
+    format_id: str | None = None,
+) -> TikTokRequestError:
+    if isinstance(error, TikTokRequestError):
+        return error
+    return TikTokRequestError(stage, error, url=url, format_id=format_id)
+
+
+def _error_stage(error: Exception) -> str:
+    return error.stage if isinstance(error, TikTokRequestError) else "unknown"
+
+
+def _log_request_failure(error: Exception, *, attempt: int | None = None) -> None:
+    context = error if isinstance(error, TikTokRequestError) else None
+    logger.warning(
+        "TikTok request failed stage=%s host=%s status=%s format_id=%s attempt=%s error=%s",
+        context.stage if context else "unknown",
+        context.host if context else None,
+        context.status_code if context else None,
+        context.format_id if context else None,
+        attempt,
+        context.cause if context else error,
+    )
 
 
 def _without_watermarked_formats(info: dict) -> dict:
@@ -237,8 +334,10 @@ async def trigger_rotation():
 
 
 def _classify_extraction_error(error: Exception) -> Exception:
+    request_error = error if isinstance(error, TikTokRequestError) else None
+    source_error = request_error.cause if request_error else error
     if isinstance(
-        error,
+        source_error,
         (
             AuthenticationRequiredError,
             MediaNotFoundError,
@@ -247,10 +346,19 @@ def _classify_extraction_error(error: Exception) -> Exception:
             UpstreamUnavailableError,
         ),
     ):
-        return error
+        return source_error
 
-    message = str(error)
+    message = str(source_error)
     lowered = message.lower()
+    if (
+        request_error
+        and request_error.stage in MEDIA_DOWNLOAD_STAGES
+        and (
+            request_error.status_code in (403, 404, 429)
+            or "forbidden" in lowered
+        )
+    ):
+        return RateLimitError(message)
     if any(
         marker in lowered
         for marker in (
@@ -312,7 +420,8 @@ def _classify_extraction_error(error: Exception) -> Exception:
 
 
 def _needs_oembed_probe(error: Exception) -> bool:
-    lowered = str(error).lower()
+    source_error = error.cause if isinstance(error, TikTokRequestError) else error
+    lowered = str(source_error).lower()
     return any(
         marker in lowered
         for marker in (
@@ -359,8 +468,21 @@ def _retry_delay_seconds() -> float:
     return max(0.0, float(os.getenv("TIKTOK_RETRY_DELAY_SECONDS", "2.0")))
 
 
-def _http_error(status_code: int, code: str, message: str) -> HTTPException:
-    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+def _format_attempts() -> int:
+    return max(1, int(os.getenv("TIKTOK_FORMAT_ATTEMPTS", "3")))
+
+
+def _http_error(
+    status_code: int,
+    code: str,
+    message: str,
+    *,
+    stage: str | None = None,
+) -> HTTPException:
+    detail = {"code": code, "message": message}
+    if stage and stage != "unknown":
+        detail["stage"] = stage
+    return HTTPException(status_code=status_code, detail=detail)
 
 
 def extract_video_id(url: str) -> str:
@@ -387,11 +509,50 @@ def canonicalize_tiktok_url(url: str) -> str:
             f"{canonical.group('kind')}/{canonical.group('id')}"
         )
 
-    legacy = re.search(r"/(?P<kind>v|video|photo)/(?P<id>\d+)", parsed.path)
+    share = re.fullmatch(r"/share/video/(?P<id>\d+)", parsed.path)
+    if share:
+        return f"https://www.tiktok.com/share/video/{share.group('id')}"
+
+    legacy = re.search(r"^/(?P<kind>v|video|photo)/(?P<id>\d+)", parsed.path)
     if legacy:
         kind = "photo" if legacy.group("kind") == "photo" else "video"
         return f"https://www.tiktok.com/@_/{kind}/{legacy.group('id')}"
     return str(url)
+
+
+def _ordered_video_formats(info: dict, ydl: YoutubeDL) -> list[dict]:
+    sortable_info = {**info, "formats": [dict(item) for item in info.get("formats") or []]}
+    ydl.sort_formats(sortable_info)
+    best_first = list(reversed(sortable_info["formats"]))
+
+    groups = (
+        lambda item: not item.get("__needs_testing") and item.get("ext") == "mp4",
+        lambda item: not item.get("__needs_testing") and item.get("ext") != "mp4",
+        lambda item: item.get("__needs_testing") and item.get("ext") == "mp4",
+        lambda item: item.get("__needs_testing") and item.get("ext") != "mp4",
+    )
+    ordered: list[dict] = []
+    seen: set[tuple[object, object]] = set()
+    for group in groups:
+        for format_info in best_first:
+            key = (format_info.get("format_id"), format_info.get("url"))
+            if not format_info.get("url") or key in seen or not group(format_info):
+                continue
+            seen.add(key)
+            ordered.append(format_info)
+    return ordered[:_format_attempts()]
+
+
+def _retryable_format_error(error: Exception) -> bool:
+    context = error if isinstance(error, TikTokRequestError) else None
+    lowered = str(context.cause if context else error).lower()
+    return (
+        (context and context.status_code in (403, 404, 429))
+        or "http error 403" in lowered
+        or "http error 404" in lowered
+        or "http error 429" in lowered
+        or "forbidden" in lowered
+    )
 
 
 async def _download_and_build_response(video_id: str, info: dict, scraper: TikTokScraper) -> ScrapeResponse:
@@ -438,13 +599,21 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
         if image_entries:
             image_info = {**info, "entries": image_entries}
             image_outtmpl = str(image_dir / "%(playlist_index)02d.%(ext)s")
-            image_ydl = _build_ydl(image_outtmpl, cookies_from=scraper._ydl)
             try:
-                await _download_with_ydl_bounded(image_ydl, image_info)
+                await _download_with_ydl_bounded(
+                    scraper,
+                    image_info,
+                    _download_options(image_outtmpl),
+                )
             except Exception as e:
                 download_error = True
-                first_download_error = first_download_error or e
-                logger.error("Image download failed: %s", e)
+                image_error = _request_error(
+                    "photo_download",
+                    e,
+                    url=image_entries[0].get("url"),
+                )
+                first_download_error = first_download_error or image_error
+                _log_request_failure(image_error)
 
             image_files = sorted(p for p in image_dir.glob("*.*") if p.is_file())
             for idx, img_path in enumerate(image_files):
@@ -467,19 +636,28 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
                 if stale_audio.is_file():
                     stale_audio.unlink()
             audio_outtmpl = str(post_dir / "audio.%(ext)s")
-            audio_ydl = _build_ydl(
-                audio_outtmpl,
-                fmt="bestaudio/best",
-                noplaylist=True,
-                extract_audio_mp3=True,
-                cookies_from=scraper._ydl,
-            )
             try:
-                await _download_with_ydl_bounded(audio_ydl, audio_entry)
+                await _download_with_ydl_bounded(
+                    scraper,
+                    audio_entry,
+                    _download_options(
+                        audio_outtmpl,
+                        fmt="bestaudio/best",
+                        noplaylist=True,
+                    ),
+                    extract_audio_mp3=True,
+                )
             except Exception as e:
                 download_error = True
-                first_download_error = first_download_error or e
-                logger.error("Audio download failed: %s", e)
+                audio_format = (audio_entry.get("formats") or [{}])[0]
+                audio_error = _request_error(
+                    "audio_download",
+                    e,
+                    url=audio_format.get("url"),
+                    format_id=audio_format.get("format_id"),
+                )
+                first_download_error = first_download_error or audio_error
+                _log_request_failure(audio_error)
 
         audio_file = post_dir / "audio.mp3"
         if not audio_file.exists():
@@ -494,54 +672,80 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
             raise first_download_error or ExtractionError("TikTok media download failed")
 
     else:
-        download_error = False
-        first_download_error = None
         video_info = _without_watermarked_formats(info)
         for stale_video in post_dir.glob("video.*"):
             if stale_video.is_file():
                 stale_video.unlink()
         video_outtmpl = str(post_dir / "video.%(ext)s")
-        video_ydl = _build_ydl(video_outtmpl, fmt="best[ext=mp4]/best", noplaylist=True, cookies_from=scraper._ydl)
-        try:
-            download_result = await _download_with_ydl_bounded(video_ydl, video_info)
-            logger.info(
-                "Selected watermark-free TikTok format id=%s codec=%s resolution=%sx%s",
-                download_result.get("format_id"),
-                download_result.get("vcodec"),
-                download_result.get("width"),
-                download_result.get("height"),
-            )
-        except Exception as e:
-            download_error = True
-            first_download_error = first_download_error or e
-            for incomplete_video in post_dir.glob("video.*"):
-                if incomplete_video.is_file():
-                    incomplete_video.unlink()
-            logger.error("Video download failed: %s", e)
+        format_errors: list[TikTokRequestError] = []
+        for format_index, format_info in enumerate(
+            _ordered_video_formats(video_info, scraper._ydl),
+            start=1,
+        ):
+            candidate_info = copy.deepcopy(video_info)
+            candidate_info["formats"] = [copy.deepcopy(format_info)]
+            try:
+                download_result = await _download_with_ydl_bounded(
+                    scraper,
+                    candidate_info,
+                    _download_options(video_outtmpl, fmt="best", noplaylist=True),
+                )
+                logger.info(
+                    "Selected watermark-free TikTok format id=%s codec=%s resolution=%sx%s attempt=%d",
+                    download_result.get("format_id"),
+                    download_result.get("vcodec"),
+                    download_result.get("width"),
+                    download_result.get("height"),
+                    format_index,
+                )
+                break
+            except Exception as e:
+                format_error = _request_error(
+                    "video_download",
+                    e,
+                    url=format_info.get("url"),
+                    format_id=format_info.get("format_id"),
+                )
+                format_errors.append(format_error)
+                _log_request_failure(format_error, attempt=format_index)
+                for incomplete_video in post_dir.glob("video.*"):
+                    if incomplete_video.is_file():
+                        incomplete_video.unlink()
+                if not _retryable_format_error(format_error):
+                    break
+
+        video_file = _find_downloaded_file(post_dir, "video")
+        if not video_file:
+            if format_errors:
+                raise format_errors[-1]
+            raise ExtractionError("TikTok did not provide a downloadable watermark-free format")
 
         thumb_outtmpl = {
             "default": str(post_dir / "video.%(ext)s"),
             "thumbnail": str(post_dir / "thumbnail.%(ext)s"),
         }
-        thumb_ydl = _build_ydl(
-            thumb_outtmpl,
-            write_thumbnail=True,
-            skip_download=True,
-            fmt="best",
-            noplaylist=True,
-            cookies_from=scraper._ydl,
-        )
         try:
-            await _download_with_ydl_bounded(thumb_ydl, video_info)
+            await _download_with_ydl_bounded(
+                scraper,
+                video_info,
+                _download_options(
+                    thumb_outtmpl,
+                    write_thumbnail=True,
+                    skip_download=True,
+                    fmt="best",
+                    noplaylist=True,
+                ),
+            )
         except Exception as e:
-            download_error = True
-            first_download_error = first_download_error or e
-            logger.error("Thumbnail download failed: %s", e)
+            thumbnail_error = _request_error(
+                "thumbnail",
+                e,
+                url=info.get("thumbnail"),
+            )
+            _log_request_failure(thumbnail_error)
 
-        video_file = _find_downloaded_file(post_dir, "video")
-        if video_file:
-            video_ext = video_file.suffix.lstrip(".")
-            video_url = f"/media/tiktok/{video_id}/video.{video_ext}"
+        video_ext = video_file.suffix.lstrip(".")
+        video_url = f"/media/tiktok/{video_id}/video.{video_ext}"
 
         thumb_file = _find_downloaded_file(post_dir, "thumbnail")
         if thumb_file:
@@ -549,9 +753,6 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
             thumbnail_url = f"/media/tiktok/{video_id}/thumbnail.{thumb_ext}"
 
         media_type = "video"
-
-        if download_error and not video_url:
-            raise first_download_error or ExtractionError("TikTok media download failed")
 
     response = ScrapeResponse(
         shortcode=video_id,
@@ -577,14 +778,24 @@ async def _process_scrape_request(request: ScrapeRequest):
     url = canonicalize_tiktok_url(str(request.url))
     video_id = None
     same_egress_retry_used = False
+    media_refresh_used = False
     vpn_reconnect_used = False
     transport_retry_used = False
 
     for attempt in range(1, TIKTOK_MAX_ATTEMPTS + 1):
         scraper = TikTokScraper()
         try:
-            if "vm.tiktok.com" in url or "vt.tiktok.com" in url or re.search(r"v[a-z]\.tiktok\.com", url) or "/t/" in url:
-                url = await UPSTREAM_RUNNER.run(scraper.resolve_short_url, url)
+            if (
+                "vm.tiktok.com" in url
+                or "vt.tiktok.com" in url
+                or re.search(r"v[a-z]\.tiktok\.com", url)
+                or "/t/" in url
+            ):
+                short_url = url
+                try:
+                    url = await UPSTREAM_RUNNER.run(scraper.resolve_short_url, url)
+                except Exception as e:
+                    raise _request_error("short_url", e, url=short_url) from e
                 url = canonicalize_tiktok_url(url)
 
             if video_id is None:
@@ -598,11 +809,16 @@ async def _process_scrape_request(request: ScrapeRequest):
                 logger.info("Cache invalid for %s, missing media; re-scraping", video_id)
 
             logger.info(f"Scraping TikTok: {video_id} (attempt {attempt})")
-            info = await UPSTREAM_RUNNER.run(scraper.extract_video, url)
+            try:
+                info = await UPSTREAM_RUNNER.run(scraper.extract_video, url)
+            except Exception as e:
+                raise _request_error("webpage", e, url=url) from e
             return await _download_and_build_response(video_id, info, scraper)
         except HTTPException:
             raise
         except Exception as e:
+            stage = _error_stage(e)
+            _log_request_failure(e, attempt=attempt)
             classified = _classify_extraction_error(e)
             if isinstance(classified, ExtractionError) and _needs_oembed_probe(e):
                 probe_result = await _probe_oembed(url)
@@ -617,11 +833,31 @@ async def _process_scrape_request(request: ScrapeRequest):
                     403,
                     "authentication_required",
                     "This TikTok post requires login or audience confirmation",
+                    stage=stage,
                 ) from e
             if isinstance(classified, MediaNotFoundError):
-                raise _http_error(404, "not_found", "TikTok post not found") from e
+                raise _http_error(
+                    404,
+                    "not_found",
+                    "TikTok post not found",
+                    stage=stage,
+                ) from e
             if isinstance(classified, RateLimitError):
-                logger.warning("TikTok attempt %d was blocked for %s: %s", attempt, video_id, e)
+                logger.warning(
+                    "TikTok attempt %d was blocked for %s at stage=%s",
+                    attempt,
+                    video_id,
+                    stage,
+                )
+                if stage in MEDIA_DOWNLOAD_STAGES and not media_refresh_used:
+                    media_refresh_used = True
+                    delay = _retry_delay_seconds()
+                    logger.info(
+                        "Refreshing TikTok media URLs once on the current egress after %.1fs.",
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 challenge_failure = _needs_oembed_probe(e)
                 if challenge_failure and not same_egress_retry_used:
                     same_egress_retry_used = True
@@ -643,11 +879,17 @@ async def _process_scrape_request(request: ScrapeRequest):
                     except RateLimitError as rotation_error:
                         logger.warning("TikTok VPN reconnect failed: %s", rotation_error)
                         raise _http_error(
-                            503, "rate_limited", "TikTok is temporarily rate limited"
+                            503,
+                            "rate_limited",
+                            "TikTok is temporarily rate limited",
+                            stage=stage,
                         ) from rotation_error
                     continue
                 raise _http_error(
-                    503, "rate_limited", "TikTok is temporarily rate limited"
+                    503,
+                    "rate_limited",
+                    "TikTok is temporarily rate limited",
+                    stage=stage,
                 ) from e
             if isinstance(classified, UpstreamUnavailableError):
                 logger.warning(
@@ -664,10 +906,16 @@ async def _process_scrape_request(request: ScrapeRequest):
                     503,
                     "upstream_unavailable",
                     "TikTok is temporarily unavailable",
+                    stage=stage,
                 ) from e
 
             logger.exception("TikTok extraction failed for %s: %s", video_id, e)
-            raise _http_error(502, "extraction_failed", "TikTok extraction failed") from e
+            raise _http_error(
+                502,
+                "extraction_failed",
+                "TikTok extraction failed",
+                stage=stage,
+            ) from e
 
     raise RuntimeError("unreachable")
 

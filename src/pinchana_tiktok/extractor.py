@@ -29,13 +29,6 @@ from yt_dlp.utils.traversal import traverse_obj
 class TikTokIE(UpstreamTikTokIE):
     """Anonymous web-only TikTok extractor with Pinchana photo-post support."""
 
-    _VALID_URL = (
-        r"https?://(?:(?:vt|vm|v|m|www)\.)?tiktok\.com/"
-        r"(?:embed/|t/|v/|@(?P<user_id>[\w.-]+)?/(?:video|photo)/)?"
-        r"(?P<id>[\w\d]+)"
-    )
-    _EMBED_REGEX = [rf'<(?:script|iframe)[^>]+\bsrc=(["\'])(?P<url>{_VALID_URL})']
-
     def _parse_frontity_video_data(self, webpage: str, display_id: str) -> dict | None:
         """Map Embed V2's Frontity payload to yt-dlp's web item shape.
 
@@ -257,45 +250,5 @@ class TikTokIE(UpstreamTikTokIE):
             and value is not None
         })
         return result
-
-    def _real_extract(self, url):
-        match = self._match_valid_url(url)
-        video_id, user_id = match.group("id", "user_id")
-
-        if not video_id.isdigit():
-            response = self._download_webpage_handle(
-                url,
-                video_id,
-                note="Resolving TikTok short-link redirect",
-                impersonate=True,
-            )
-            if response:
-                _, url_handle = response
-                redirected = re.search(
-                    r"https?://www\.tiktok\.com/@(?P<user_id>[\w.-]+)/"
-                    r"(?:video|photo)/(?P<id>\d+)",
-                    url_handle.url,
-                )
-                if redirected:
-                    video_id, user_id = redirected.group("id", "user_id")
-            if not video_id.isdigit():
-                raise ExtractorError("Unable to resolve TikTok short URL", expected=True)
-
-        canonical_url = self._create_url(user_id, video_id)
-        video_data, status = self._extract_web_data_and_status(canonical_url, video_id)
-        if video_data and status == 0:
-            return self._parse_aweme_video_web(video_data, canonical_url, video_id)
-        if status in (10216, 10222):
-            self.raise_login_required(
-                "You do not have permission to view this post. Log into an account that has access"
-            )
-        if status == 10204:
-            raise ExtractorError(
-                "Your IP address is blocked from accessing this post", expected=True
-            )
-        raise ExtractorError(
-            f"Video not available, status code {status}", video_id=video_id, expected=True
-        )
-
 
 __all__ = ["TikTokIE", "TikTokLiveIE", "TikTokUserIE", "TikTokVMIE"]

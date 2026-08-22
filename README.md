@@ -28,6 +28,7 @@ External clients should call the gateway's authenticated `POST /v1/scrape` route
 | `YTDLP_CONCURRENCY` | `1` | Maximum concurrent yt-dlp operations |
 | `TIKTOK_REQUEST_INTERVAL_SECONDS` | `2.0` | Minimum delay between upstream request starts |
 | `TIKTOK_RETRY_DELAY_SECONDS` | `2.0` | Delay before retrying a web challenge with a fresh anonymous session |
+| `TIKTOK_FORMAT_ATTEMPTS` | `3` | Maximum watermark-free video formats attempted before refreshing media URLs |
 | `TIKTOK_VPN_ROTATION_COOLDOWN_SECONDS` | `30` | Minimum delay between TikTok-triggered Gluetun reconnects |
 | `TIKTOK_PROXY_URL` | empty | Optional HTTP/SOCKS proxy applied to extraction and every media download |
 | `GLUETUN_CONTROL_URL` | `http://localhost:8000` | Private Gluetun control endpoint |

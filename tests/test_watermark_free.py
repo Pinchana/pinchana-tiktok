@@ -109,6 +109,97 @@ def test_watermarked_only_video_is_rejected():
         raise AssertionError("Watermarked-only video should be rejected")
 
 
+def test_format_order_prefers_stable_mp4_before_testing_formats(monkeypatch):
+    monkeypatch.setenv("TIKTOK_FORMAT_ATTEMPTS", "3")
+    ydl = YoutubeDL({"quiet": True, "no_warnings": True})
+    info = {
+        "formats": [
+            {
+                "format_id": "testing-mp4",
+                "url": "https://cdn.example/testing.mp4",
+                "ext": "mp4",
+                "height": 2160,
+                "__needs_testing": True,
+            },
+            {
+                "format_id": "stable-webm",
+                "url": "https://cdn.example/stable.webm",
+                "ext": "webm",
+                "height": 1080,
+            },
+            {
+                "format_id": "stable-mp4",
+                "url": "https://cdn.example/stable.mp4",
+                "ext": "mp4",
+                "height": 720,
+            },
+        ],
+    }
+
+    ordered = main._ordered_video_formats(info, ydl)
+
+    assert [item["format_id"] for item in ordered] == [
+        "stable-mp4",
+        "stable-webm",
+        "testing-mp4",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_video_download_tries_alternate_format_in_same_session(
+    monkeypatch,
+    tmp_path,
+):
+    scraper = SimpleNamespace(
+        _ydl=YoutubeDL({"quiet": True, "no_warnings": True})
+    )
+    calls = []
+
+    async def download(candidate_scraper, info, options, **_kwargs):
+        calls.append((candidate_scraper, (info.get("formats") or [{}])[0].get("format_id")))
+        if len(calls) == 1:
+            raise RuntimeError("HTTP Error 403: Forbidden")
+        if options.get("skip_download"):
+            return info
+        video_file = tmp_path / "123" / "video.mp4"
+        video_file.parent.mkdir(parents=True, exist_ok=True)
+        video_file.write_bytes(b"video")
+        return {
+            **info,
+            "format_id": (info.get("formats") or [{}])[0].get("format_id"),
+        }
+
+    monkeypatch.setattr(main, "storage", MediaStorage(tmp_path))
+    monkeypatch.setattr(main, "_download_with_ydl_bounded", download)
+
+    response = await main._download_and_build_response(
+        "123",
+        {
+            "id": "123",
+            "title": "video",
+            "formats": [
+                {
+                    "format_id": "low",
+                    "url": "https://cdn.example/low.mp4",
+                    "ext": "mp4",
+                    "height": 720,
+                },
+                {
+                    "format_id": "high",
+                    "url": "https://cdn.example/high.mp4",
+                    "ext": "mp4",
+                    "height": 1080,
+                },
+            ],
+        },
+        scraper,
+    )
+
+    assert [format_id for _, format_id in calls[:2]] == ["high", "low"]
+    assert all(candidate_scraper is scraper for candidate_scraper, _ in calls)
+    assert response.video_url == "/media/tiktok/123/video.mp4"
+
+
 @pytest.mark.asyncio
 async def test_watermarked_only_scrape_returns_extraction_failure(monkeypatch, tmp_path):
     class Scraper:

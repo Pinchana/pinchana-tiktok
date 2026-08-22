@@ -148,6 +148,65 @@ def test_extractor_errors_are_classified_without_broad_unavailable_matching(
     assert isinstance(main._classify_extraction_error(RuntimeError(message)), exception_type)
 
 
+def test_media_404_is_classified_as_refreshable_with_stage_context():
+    error = main.TikTokRequestError(
+        "video_download",
+        RuntimeError("HTTP Error 404: Not Found"),
+        url="https://v16.tiktokcdn.com/video.mp4",
+        format_id="play_addr",
+    )
+
+    assert isinstance(main._classify_extraction_error(error), main.RateLimitError)
+    assert error.stage == "video_download"
+    assert error.host == "v16.tiktokcdn.com"
+    assert error.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_media_403_refreshes_urls_before_vpn_rotation(monkeypatch):
+    extractions = 0
+    downloads = 0
+    rotations = 0
+
+    class Scraper:
+        def extract_video(self, _url):
+            nonlocal extractions
+            extractions += 1
+            return {"id": "123456"}
+
+    async def fake_build_response(_video_id, info, _scraper):
+        nonlocal downloads
+        downloads += 1
+        if downloads == 1:
+            raise main.TikTokRequestError(
+                "video_download",
+                RuntimeError("HTTP Error 403: Forbidden"),
+                url="https://v16.tiktokcdn.com/video.mp4",
+                format_id="play_addr",
+            )
+        return info
+
+    async def fake_rotation():
+        nonlocal rotations
+        rotations += 1
+
+    monkeypatch.setenv("VPN_ENABLED", "1")
+    monkeypatch.setenv("TIKTOK_RETRY_DELAY_SECONDS", "0")
+    monkeypatch.setattr(main, "TikTokScraper", Scraper)
+    monkeypatch.setattr(main, "_download_and_build_response", fake_build_response)
+    monkeypatch.setattr(main, "trigger_rotation", fake_rotation)
+    monkeypatch.setattr(main.storage, "is_cached", lambda _post_id: False)
+
+    result = await main._process_scrape_request(
+        SimpleNamespace(url="https://www.tiktok.com/@creator/video/123456")
+    )
+
+    assert result == {"id": "123456"}
+    assert extractions == 2
+    assert downloads == 2
+    assert rotations == 0
+
+
 async def _async_value(value):
     return value
 
@@ -216,6 +275,10 @@ async def test_oembed_not_found_disambiguates_missing_web_data(monkeypatch):
         (
             "https://www.tiktok.com/v/7663781221171776789?lang=en",
             "https://www.tiktok.com/@_/video/7663781221171776789",
+        ),
+        (
+            "https://www.tiktok.com/share/video/7663781221171776789?share_app_id=1233",
+            "https://www.tiktok.com/share/video/7663781221171776789",
         ),
     ],
 )
