@@ -5,8 +5,8 @@ This FastAPI module extracts supported public TikTok posts through a dedicated y
 ## Processing flow
 
 1. Resolve supported canonical and short TikTok URLs.
-2. Extract media metadata with the project extractor.
-3. Reuse anonymous cookies, pace upstream work globally, and retry temporary failures within a bounded policy.
+2. Request fresh media mirrors from TikTok's anonymous player endpoint; fall back to yt-dlp's challenged webpage extractor when that endpoint has no usable result.
+3. Preserve each returned CDN mirror, reuse anonymous cookies, pace upstream work globally, and retry temporary failures within a bounded policy.
 4. When the deployment-wide VPN is enabled, rotate Gluetun once after a confirmed platform block.
 5. Download ordered media to `/app/cache/tiktok/{post_id}` in containers.
 

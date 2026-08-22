@@ -89,8 +89,9 @@ class TikTokScraper:
             key: dict(value)
             for key, value in ydl_opts.pop("extractor_args", {}).items()
         }
-        # Pinchana's public scraper is intentionally anonymous and web-only.
-        # Do not let internal callers accidentally opt into the mobile API.
+        # Pinchana's public scraper is intentionally anonymous.  It uses the
+        # official player endpoint with the web extractor as fallback, never a
+        # device identity tied to TikTok's private mobile API.
         tiktok_args = extractor_args.setdefault("tiktok", {})
         tiktok_args.pop("device_id", None)
         tiktok_args.pop("app_info", None)
@@ -115,9 +116,9 @@ class TikTokScraper:
             For photo slideshows the dict will have ``_type: "playlist"``
             with image entries.
         """
-        # Upstream TikTokIE owns URL routing, including /share/video URLs.  A
-        # photo post is served by the same canonical video endpoint, so only
-        # normalize that Pinchana-specific spelling before handing it over.
+        # TikTokIE owns URL routing, including /share/video URLs.  A photo post
+        # is served by the same canonical endpoint, so only normalize that
+        # Pinchana-specific spelling before handing it over.
         extractor_url = re.sub(r"(/@[\w.-]*/|/share/)photo/", r"\1video/", url)
         ie = TikTokIE(self._ydl)
         try:

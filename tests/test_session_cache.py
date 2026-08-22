@@ -57,15 +57,32 @@ def test_session_cache_reuses_cookies_without_mobile_identity(monkeypatch):
     assert "device_id" not in third._ydl.params["extractor_args"]["tiktok"]
 
 
-def test_video_extraction_uses_web_before_app_api(monkeypatch):
+def test_video_extraction_uses_player_api_before_web(monkeypatch):
     ie = TikTokIE(YoutubeDL({"quiet": True}))
-    app_calls = 0
+    monkeypatch.setattr(
+        ie,
+        "_extract_player_api",
+        lambda video_id, _url: {"id": video_id, "formats": [{"url": "https://cdn.example/video.mp4"}]},
+    )
+    monkeypatch.setattr(
+        ie,
+        "_extract_web_data_and_status",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("webpage should only be a fallback")
+        ),
+    )
 
-    def fail_if_app_called(_video_id):
-        nonlocal app_calls
-        app_calls += 1
-        raise AssertionError("app API should only be a fallback")
+    result = ie._real_extract(
+        "https://www.tiktok.com/@creator/video/7663781221171776789"
+    )
 
+    assert result["id"] == "7663781221171776789"
+    assert result["formats"][0]["url"] == "https://cdn.example/video.mp4"
+
+
+def test_video_extraction_falls_back_to_web_without_mobile_api(monkeypatch):
+    ie = TikTokIE(YoutubeDL({"quiet": True}))
+    monkeypatch.setattr(ie, "_extract_player_api", lambda _video_id, _url: None)
     monkeypatch.setattr(
         ie,
         "_extract_web_data_and_status",
@@ -76,14 +93,19 @@ def test_video_extraction_uses_web_before_app_api(monkeypatch):
         "_parse_aweme_video_web",
         lambda _data, _url, video_id: {"id": video_id},
     )
-    monkeypatch.setattr(ie, "_extract_aweme_app", fail_if_app_called)
+    monkeypatch.setattr(
+        ie,
+        "_extract_aweme_app",
+        lambda _video_id: (_ for _ in ()).throw(
+            AssertionError("anonymous extraction must not call the mobile API")
+        ),
+    )
 
     result = ie._real_extract(
         "https://www.tiktok.com/@creator/video/7663781221171776789"
     )
 
     assert result == {"id": "7663781221171776789"}
-    assert app_calls == 0
 
 
 def test_mobile_app_api_is_never_called_after_web_failure(monkeypatch):
@@ -98,6 +120,7 @@ def test_mobile_app_api_is_never_called_after_web_failure(monkeypatch):
         app_calls += 1
         raise AssertionError("anonymous extraction must not call the mobile API")
 
+    monkeypatch.setattr(ie, "_extract_player_api", lambda _video_id, _url: None)
     monkeypatch.setattr(ie, "_extract_web_data_and_status", fail_web)
     monkeypatch.setattr(ie, "_extract_aweme_app", extract_app)
 

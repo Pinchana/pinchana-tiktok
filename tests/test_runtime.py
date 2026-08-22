@@ -88,6 +88,7 @@ async def test_upstream_runner_paces_job_starts():
 )
 def test_share_urls_use_upstream_numeric_id_without_redirect(monkeypatch, url):
     ie = TikTokIE(YoutubeDL({"quiet": True, "no_warnings": True}))
+    monkeypatch.setattr(ie, "_extract_player_api", lambda _video_id, _url: None)
     monkeypatch.setattr(
         ie,
         "_extract_web_data_and_status",
