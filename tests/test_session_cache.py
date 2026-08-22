@@ -119,7 +119,7 @@ def test_embed_page_is_only_used_after_canonical_page_misses(monkeypatch):
 
     def download_canonical(url, _video_id, _note, **_kwargs):
         events.append(("canonical", url))
-        return "<html>no metadata</html>", SimpleNamespace(url=url)
+        return "<html>no metadata</html>", SimpleNamespace(url=url, extensions={})
 
     def download_embed(url, _video_id, **_kwargs):
         events.append(("embed", url))
