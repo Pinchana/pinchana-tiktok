@@ -1,6 +1,6 @@
 [project]
 name = "pinchana-tiktok"
-version = "0.2b0"
+version = "26.8.1"
 description = "TikTok scraper service"
 readme = "README.md"
 requires-python = ">=3.13"
