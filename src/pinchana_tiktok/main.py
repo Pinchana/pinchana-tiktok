@@ -38,7 +38,7 @@ storage = MediaStorage(
     base_path=os.getenv("CACHE_PATH", "./cache"),
     max_size_gb=float(os.getenv("CACHE_MAX_SIZE_GB", "10.0")),
 )
-TIKTOK_VIDEO_CACHE_VERSION = 2
+TIKTOK_VIDEO_CACHE_VERSION = 3
 
 
 class TikTokUpstreamRunner:
@@ -565,7 +565,7 @@ def _retryable_format_error(error: Exception) -> bool:
 
 
 def _transcode_hevc_enabled() -> bool:
-    return os.getenv("TIKTOK_TRANSCODE_HEVC", "true").strip().lower() in {
+    return os.getenv("TIKTOK_TRANSCODE_HEVC", "false").strip().lower() in {
         "1",
         "true",
         "yes",

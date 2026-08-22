@@ -206,6 +206,14 @@ async def test_hevc_video_is_converted_to_share_compatible_h264(monkeypatch, tmp
     assert observed["kwargs"]["stderr"] == asyncio.subprocess.PIPE
 
 
+def test_hevc_transcoding_is_opt_in(monkeypatch):
+    monkeypatch.delenv("TIKTOK_TRANSCODE_HEVC", raising=False)
+    assert not main._transcode_hevc_enabled()
+
+    monkeypatch.setenv("TIKTOK_TRANSCODE_HEVC", "true")
+    assert main._transcode_hevc_enabled()
+
+
 @pytest.mark.asyncio
 async def test_video_download_tries_alternate_format_in_same_session(
     monkeypatch,
