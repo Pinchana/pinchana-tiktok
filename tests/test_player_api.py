@@ -1,3 +1,5 @@
+from urllib.parse import urlsplit
+
 from yt_dlp import YoutubeDL
 
 from pinchana_tiktok import main
@@ -123,3 +125,53 @@ def test_player_api_mismatch_falls_back_instead_of_serving_wrong_post(monkeypatc
     )
 
     assert extractor._extract_player_api(VIDEO_ID, WEBPAGE_URL) is None
+
+
+def test_web_hd_redirect_is_routed_to_tiktok_playback_hosts():
+    web_data = {
+        "video": {
+            "bitrateInfo": [
+                {
+                    "GearName": "lowest_540_0",
+                    "CodecType": "h264",
+                    "PlayAddr": {
+                        "Width": 576,
+                        "Height": 1024,
+                        "UrlList": ["https://www.tiktok.com/aweme/v1/play/?low=1"],
+                    },
+                },
+                {
+                    "GearName": "adapt_lower_720_1",
+                    "CodecType": "h265_hvc1",
+                    "Bitrate": 746598,
+                    "BitrateFPS": 30,
+                    "PlayAddr": {
+                        "Width": 720,
+                        "Height": 1280,
+                        "DataSize": "2840807",
+                        "UrlList": [
+                            "https://v16-webapp-prime.tiktok.com/video.mp4",
+                            "https://www.tiktok.com/aweme/v1/play/?signaturev3=hd",
+                        ],
+                    },
+                },
+            ],
+        },
+    }
+
+    formats = _extractor()._parse_web_hd_formats(
+        web_data,
+        WEBPAGE_URL,
+        minimum_height=1024,
+    )
+
+    assert len(formats) == 3
+    assert all(item["height"] == 1280 for item in formats)
+    assert all(item["vcodec"] == "h265" for item in formats)
+    assert all(item["__hd_refresh"] for item in formats)
+    assert [urlsplit(item["url"]).hostname for item in formats] == [
+        "api16-normal-no1a.tiktokv.eu",
+        "api16-normal-c-useast1a.tiktokv.com",
+        "api22-normal-c-useast1a.tiktokv.com",
+    ]
+    assert all("signaturev3=hd" in item["url"] for item in formats)

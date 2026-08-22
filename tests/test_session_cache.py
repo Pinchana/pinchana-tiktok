@@ -57,20 +57,14 @@ def test_session_cache_reuses_cookies_without_mobile_identity(monkeypatch):
     assert "device_id" not in third._ydl.params["extractor_args"]["tiktok"]
 
 
-def test_video_extraction_uses_player_api_before_web(monkeypatch):
+def test_video_extraction_uses_player_api_with_optional_hd_discovery(monkeypatch):
     ie = TikTokIE(YoutubeDL({"quiet": True}))
     monkeypatch.setattr(
         ie,
         "_extract_player_api",
         lambda video_id, _url: {"id": video_id, "formats": [{"url": "https://cdn.example/video.mp4"}]},
     )
-    monkeypatch.setattr(
-        ie,
-        "_extract_web_data_and_status",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("webpage should only be a fallback")
-        ),
-    )
+    monkeypatch.setattr(ie, "_extract_web_hd_formats", lambda *_args: [])
 
     result = ie._real_extract(
         "https://www.tiktok.com/@creator/video/7663781221171776789"

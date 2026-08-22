@@ -38,7 +38,7 @@ storage = MediaStorage(
     base_path=os.getenv("CACHE_PATH", "./cache"),
     max_size_gb=float(os.getenv("CACHE_MAX_SIZE_GB", "10.0")),
 )
-TIKTOK_VIDEO_CACHE_VERSION = 1
+TIKTOK_VIDEO_CACHE_VERSION = 2
 
 
 class TikTokUpstreamRunner:
@@ -540,7 +540,16 @@ def _ordered_video_formats(info: dict, ydl: YoutubeDL) -> list[dict]:
                 continue
             seen.add(key)
             ordered.append(format_info)
-    return ordered[:_format_attempts()]
+    attempt_limit = _format_attempts()
+    hd_formats = [item for item in ordered if item.get("__hd_refresh")]
+    player_formats = [item for item in ordered if item.get("__player_api")]
+    if hd_formats and player_formats and attempt_limit > 1:
+        # Always reserve the final attempt for the independent anonymous
+        # player endpoint.  HD redirect failures must not remove the reliable
+        # 540p fallback that motivated this extraction path.
+        selected = [*hd_formats[:attempt_limit - 1], player_formats[0]]
+        return selected[:attempt_limit]
+    return ordered[:attempt_limit]
 
 
 def _retryable_format_error(error: Exception) -> bool:
@@ -553,6 +562,74 @@ def _retryable_format_error(error: Exception) -> bool:
         or "http error 429" in lowered
         or "forbidden" in lowered
     )
+
+
+def _transcode_hevc_enabled() -> bool:
+    return os.getenv("TIKTOK_TRANSCODE_HEVC", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+async def _transcode_hevc_for_sharing(source: Path) -> Path:
+    destination = source.with_name(f"{source.stem}.h264{source.suffix}")
+    destination.unlink(missing_ok=True)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-nostdin",
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            str(source),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-tag:v",
+            "avc1",
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(destination),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        logger.warning("TikTok HEVC compatibility conversion skipped: ffmpeg unavailable")
+        return source
+    try:
+        _, stderr = await asyncio.wait_for(
+            process.communicate(),
+            timeout=max(
+                1.0,
+                float(os.getenv("TIKTOK_HEVC_TRANSCODE_TIMEOUT_SECONDS", "180")),
+            ),
+        )
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        destination.unlink(missing_ok=True)
+        logger.warning("TikTok HEVC compatibility conversion timed out")
+        return source
+    if process.returncode != 0 or not destination.is_file() or not destination.stat().st_size:
+        destination.unlink(missing_ok=True)
+        logger.warning(
+            "TikTok HEVC compatibility conversion failed: %s",
+            stderr.decode(errors="replace").strip(),
+        )
+        return source
+    destination.replace(source)
+    logger.info("Converted TikTok HEVC video to share-compatible H.264 MP4")
+    return source
 
 
 async def _download_and_build_response(video_id: str, info: dict, scraper: TikTokScraper) -> ScrapeResponse:
@@ -678,6 +755,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
                 stale_video.unlink()
         video_outtmpl = str(post_dir / "video.%(ext)s")
         format_errors: list[TikTokRequestError] = []
+        selected_vcodec = None
         for format_index, format_info in enumerate(
             _ordered_video_formats(video_info, scraper._ydl),
             start=1,
@@ -698,6 +776,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
                     download_result.get("height"),
                     format_index,
                 )
+                selected_vcodec = download_result.get("vcodec") or format_info.get("vcodec")
                 break
             except Exception as e:
                 format_error = _request_error(
@@ -719,6 +798,11 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
             if format_errors:
                 raise format_errors[-1]
             raise ExtractionError("TikTok did not provide a downloadable watermark-free format")
+        if (
+            _transcode_hevc_enabled()
+            and str(selected_vcodec or "").lower() in {"h265", "hevc", "hvc1"}
+        ):
+            video_file = await _transcode_hevc_for_sharing(video_file)
 
         thumb_outtmpl = {
             "default": str(post_dir / "video.%(ext)s"),

@@ -5,10 +5,11 @@ This FastAPI module extracts supported public TikTok posts through a dedicated y
 ## Processing flow
 
 1. Resolve supported canonical and short TikTok URLs.
-2. Request fresh media mirrors from TikTok's anonymous player endpoint; fall back to yt-dlp's challenged webpage extractor when that endpoint has no usable result.
-3. Preserve each returned CDN mirror, reuse anonymous cookies, pace upstream work globally, and retry temporary failures within a bounded policy.
-4. When the deployment-wide VPN is enabled, rotate Gluetun once after a confirmed platform block.
-5. Download ordered media to `/app/cache/tiktok/{post_id}` in containers.
+2. Request reliable media mirrors from TikTok's anonymous player endpoint and discover higher-resolution renditions from its webpage metadata when available.
+3. Refresh signed HD playback through TikTok-owned redirect hosts, then preserve the anonymous player URL as an independent fallback.
+4. Reuse anonymous cookies, pace upstream work globally, and retry temporary failures within a bounded policy.
+5. When the deployment-wide VPN is enabled, rotate Gluetun once after a confirmed platform block.
+6. Download ordered media to `/app/cache/tiktok/{post_id}` in containers.
 
 The gateway's API v1 response represents slideshow images as ordered `content` assets and their audio as a `soundtrack` asset.
 
@@ -29,6 +30,8 @@ External clients should call the gateway's authenticated `POST /v1/scrape` route
 | `TIKTOK_REQUEST_INTERVAL_SECONDS` | `2.0` | Minimum delay between upstream request starts |
 | `TIKTOK_RETRY_DELAY_SECONDS` | `2.0` | Delay before retrying a web challenge with a fresh anonymous session |
 | `TIKTOK_FORMAT_ATTEMPTS` | `3` | Maximum watermark-free video formats attempted before refreshing media URLs |
+| `TIKTOK_TRANSCODE_HEVC` | `true` | Convert HEVC HD renditions to broadly share-compatible H.264 MP4 |
+| `TIKTOK_HEVC_TRANSCODE_TIMEOUT_SECONDS` | `180` | Maximum time allowed for an HEVC compatibility conversion |
 | `TIKTOK_VPN_ROTATION_COOLDOWN_SECONDS` | `30` | Minimum delay between TikTok-triggered Gluetun reconnects |
 | `TIKTOK_PROXY_URL` | empty | Optional HTTP/SOCKS proxy applied to extraction and every media download |
 | `GLUETUN_CONTROL_URL` | `http://localhost:8000` | Private Gluetun control endpoint |

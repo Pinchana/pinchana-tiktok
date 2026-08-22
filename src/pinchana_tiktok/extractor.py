@@ -8,7 +8,7 @@ URL and photo-post support that yt-dlp does not expose as ordered image assets.
 from __future__ import annotations
 
 import re
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
 from yt_dlp.extractor.tiktok import (
     TikTokIE as UpstreamTikTokIE,
@@ -32,6 +32,11 @@ class TikTokIE(UpstreamTikTokIE):
     """Anonymous TikTok player extractor with challenged-web fallback."""
 
     _PLAYER_API_URL = "https://www.tiktok.com/player/api/v1/items"
+    _HD_PLAYBACK_HOSTS = (
+        "api16-normal-no1a.tiktokv.eu",
+        "api16-normal-c-useast1a.tiktokv.com",
+        "api22-normal-c-useast1a.tiktokv.com",
+    )
 
     @staticmethod
     def _timestamp_from_id(video_id: str) -> int | None:
@@ -130,6 +135,7 @@ class TikTokIE(UpstreamTikTokIE):
                     "vcodec": traverse_obj(profile, ("codec_type", {str})),
                     "source_preference": len(urls) - mirror_index,
                     "http_headers": {"Referer": webpage_url},
+                    "__player_api": True,
                 })
 
         if not formats:
@@ -138,6 +144,105 @@ class TikTokIE(UpstreamTikTokIE):
             **self._player_metadata(item, video_id, webpage_url),
             "formats": formats,
         }
+
+    @staticmethod
+    def _codec_name(value) -> str | None:
+        codec = str(value or "").lower()
+        if "265" in codec or "bytevc" in codec or "hevc" in codec:
+            return "h265"
+        if "264" in codec or "avc" in codec:
+            return "h264"
+        return codec or None
+
+    def _parse_web_hd_formats(
+        self,
+        web_data: dict,
+        webpage_url: str,
+        minimum_height: int,
+    ) -> list[dict]:
+        """Turn TikTok's signed HD playback redirects into fresh CDN mirrors."""
+        video = web_data.get("video") or {}
+        bitrate_info = video.get("bitrateInfo") or video.get("bitRate") or []
+        formats = []
+        for profile_index, profile in enumerate(bitrate_info):
+            if not isinstance(profile, dict):
+                continue
+            play_addr = profile.get("PlayAddr") or profile.get("playAddr") or {}
+            height = int_or_none(play_addr.get("Height") or play_addr.get("height"))
+            if not height or height <= minimum_height:
+                continue
+            playback_url = next(
+                (
+                    url
+                    for url in play_addr.get("UrlList") or play_addr.get("urlList") or []
+                    if url_or_none(url) and "/aweme/v1/play/" in url
+                ),
+                None,
+            )
+            if not playback_url:
+                continue
+            parsed_url = urlsplit(playback_url)
+            format_name = (
+                profile.get("GearName")
+                or profile.get("gearName")
+                or play_addr.get("UrlKey")
+                or play_addr.get("urlKey")
+                or f"quality-{profile_index + 1}"
+            )
+            for mirror_index, host in enumerate(self._HD_PLAYBACK_HOSTS):
+                formats.append({
+                    "format_id": f"hd-{format_name}-{mirror_index + 1}",
+                    "format_note": "Original TikTok HD playback",
+                    "url": urlunsplit((
+                        parsed_url.scheme,
+                        host,
+                        parsed_url.path,
+                        parsed_url.query,
+                        parsed_url.fragment,
+                    )),
+                    "ext": "mp4",
+                    "width": int_or_none(
+                        play_addr.get("Width") or play_addr.get("width")
+                    ),
+                    "height": height,
+                    "fps": int_or_none(
+                        profile.get("BitrateFPS") or profile.get("bitrateFPS")
+                    ),
+                    "tbr": float_or_none(
+                        profile.get("Bitrate") or profile.get("bitrate"),
+                        scale=1000,
+                    ),
+                    "filesize": int_or_none(
+                        play_addr.get("DataSize") or play_addr.get("dataSize")
+                    ),
+                    "vcodec": self._codec_name(
+                        profile.get("CodecType") or profile.get("codecType")
+                    ),
+                    "acodec": "aac",
+                    "source_preference": len(self._HD_PLAYBACK_HOSTS) - mirror_index,
+                    "http_headers": {"Referer": webpage_url},
+                    "__hd_refresh": True,
+                })
+        return formats
+
+    def _extract_web_hd_formats(
+        self,
+        url: str,
+        video_id: str,
+        minimum_height: int,
+    ) -> list[dict]:
+        try:
+            web_data, status = self._extract_web_data_and_status(
+                url,
+                video_id,
+                fatal=False,
+            )
+        except ExtractorError as error:
+            self.report_warning(f"Unable to discover TikTok HD rendition: {error}")
+            return []
+        if not web_data or status != 0:
+            return []
+        return self._parse_web_hd_formats(web_data, url, minimum_height)
 
     def _parse_player_photo(
         self,
@@ -239,9 +344,26 @@ class TikTokIE(UpstreamTikTokIE):
         return self._parse_player_video(item, video_id, webpage_url)
 
     def _real_extract(self, url):
-        video_id = self._match_valid_url(url).group("id")
+        video_id, user_id = self._match_valid_url(url).group("id", "user_id")
         player_info = self._extract_player_api(video_id, url)
         if player_info:
+            if player_info.get("formats"):
+                player_height = max(
+                    (
+                        int_or_none(format_info.get("height")) or 0
+                        for format_info in player_info["formats"]
+                    ),
+                    default=0,
+                )
+                canonical_url = self._create_url(user_id, video_id)
+                player_info["formats"] = [
+                    *self._extract_web_hd_formats(
+                        canonical_url,
+                        video_id,
+                        player_height,
+                    ),
+                    *player_info["formats"],
+                ]
             return player_info
         self.report_warning("TikTok player API did not return usable media; trying webpage")
         return super()._real_extract(url)

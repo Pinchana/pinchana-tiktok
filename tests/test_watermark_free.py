@@ -1,3 +1,5 @@
+import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -143,6 +145,65 @@ def test_format_order_prefers_stable_mp4_before_testing_formats(monkeypatch):
         "stable-webm",
         "testing-mp4",
     ]
+
+
+def test_format_order_reserves_player_fallback_after_hd_mirrors(monkeypatch):
+    monkeypatch.setenv("TIKTOK_FORMAT_ATTEMPTS", "3")
+    ydl = YoutubeDL({"quiet": True, "no_warnings": True})
+    info = {
+        "formats": [
+            {
+                "format_id": f"hd-{index}",
+                "url": f"https://api{index}.tiktokv.com/play",
+                "ext": "mp4",
+                "height": 1920,
+                "__hd_refresh": True,
+            }
+            for index in range(3)
+        ] + [{
+            "format_id": "player-540",
+            "url": "https://v45.tiktokcdn-eu.com/video.mp4",
+            "ext": "mp4",
+            "height": 1024,
+            "__player_api": True,
+        }],
+    }
+
+    ordered = main._ordered_video_formats(info, ydl)
+
+    assert [item["format_id"] for item in ordered] == [
+        "hd-2",
+        "hd-1",
+        "player-540",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_hevc_video_is_converted_to_share_compatible_h264(monkeypatch, tmp_path):
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"hevc")
+    observed = {}
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def create_process(*args, **kwargs):
+        observed.update(args=args, kwargs=kwargs)
+        Path(args[-1]).write_bytes(b"h264")
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+
+    result = await main._transcode_hevc_for_sharing(source)
+
+    assert result == source
+    assert source.read_bytes() == b"h264"
+    assert "libx264" in observed["args"]
+    assert "yuv420p" in observed["args"]
+    assert observed["kwargs"]["stderr"] == asyncio.subprocess.PIPE
 
 
 @pytest.mark.asyncio
