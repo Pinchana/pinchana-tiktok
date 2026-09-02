@@ -294,10 +294,61 @@ async def test_watermarked_only_scrape_returns_extraction_failure(monkeypatch, t
     assert exc_info.value.detail["code"] == "extraction_failed"
 
 
-def test_legacy_video_cache_is_invalidated_but_carousel_cache_is_preserved():
+def test_cache_requires_current_version_and_nonempty_media(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.storage, "base_path", tmp_path)
     assert not main._cached_media_ready({"media_type": "video"})
-    assert main._cached_media_ready({
+    assert not main._cached_media_ready({"media_type": "carousel"})
+
+    cached = {
         "media_type": "video",
         "_tiktok_video_cache_version": main.TIKTOK_VIDEO_CACHE_VERSION,
-    })
-    assert main._cached_media_ready({"media_type": "carousel"})
+        "video_url": "/media/tiktok/123/video.mp4",
+    }
+    media = tmp_path / "123" / "video.mp4"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"")
+    assert not main._cached_media_ready(cached)
+
+    media.write_bytes(b"video")
+    assert main._cached_media_ready(cached)
+
+
+@pytest.mark.asyncio
+async def test_incomplete_carousel_is_retryable_and_not_cached(monkeypatch, tmp_path):
+    class Storage(MediaStorage):
+        saved = False
+
+        def save_metadata(self, post_id, metadata):
+            self.saved = True
+            return super().save_metadata(post_id, metadata)
+
+    storage = Storage(tmp_path)
+
+    async def incomplete_download(_scraper, _info, _options, **_kwargs):
+        image = tmp_path / "123" / "images" / "01.jpg"
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"image")
+        return _info
+
+    class Scraper:
+        def extract_video(self, _url):
+            return {
+                "_type": "playlist",
+                "entries": [
+                    {"url": "https://cdn.example/1.jpg", "ext": "jpg"},
+                    {"url": "https://cdn.example/2.jpg", "ext": "jpg"},
+                ],
+            }
+
+    monkeypatch.setattr(main, "storage", storage)
+    monkeypatch.setattr(main, "TikTokScraper", Scraper)
+    monkeypatch.setattr(main, "_download_with_ydl_bounded", incomplete_download)
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main._process_scrape_request(
+            SimpleNamespace(url="https://www.tiktok.com/@creator/photo/123")
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["code"] == "media_download_failed"
+    assert storage.saved is False

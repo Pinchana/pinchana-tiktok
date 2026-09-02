@@ -87,10 +87,7 @@ def _cached_media_ready(metadata: dict) -> bool:
     if not isinstance(metadata, dict):
         return False
 
-    if (
-        metadata.get("media_type") == "video"
-        and metadata.get("_tiktok_video_cache_version") != TIKTOK_VIDEO_CACHE_VERSION
-    ):
+    if metadata.get("_tiktok_video_cache_version") != TIKTOK_VIDEO_CACHE_VERSION:
         return False
 
     urls: list[str] = []
@@ -112,9 +109,12 @@ def _cached_media_ready(metadata: dict) -> bool:
     if carousel and metadata.get("audio_url") and not str(metadata["audio_url"]).endswith(".mp3"):
         return False
 
+    if not urls:
+        return False
+
     for url in urls:
         path = _media_url_to_path(url)
-        if not path or not path.exists():
+        if not path or not path.is_file() or path.stat().st_size == 0:
             return False
 
     return True
@@ -233,6 +233,11 @@ class MediaNotFoundError(Exception):
 
 class ExtractionError(Exception):
     """Raised for unexpected extractor failures that must not be retried."""
+    pass
+
+
+class MediaDownloadError(ExtractionError):
+    """Raised when required TikTok media was not persisted completely."""
     pass
 
 
@@ -692,7 +697,14 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
                 first_download_error = first_download_error or image_error
                 _log_request_failure(image_error)
 
-            image_files = sorted(p for p in image_dir.glob("*.*") if p.is_file())
+            image_files = sorted(
+                p for p in image_dir.glob("*.*") if p.is_file() and p.stat().st_size > 0
+            )
+            if len(image_files) != len(image_entries):
+                download_error = True
+                first_download_error = first_download_error or MediaDownloadError(
+                    f"Downloaded {len(image_files)} of {len(image_entries)} TikTok images"
+                )
             for idx, img_path in enumerate(image_files):
                 ext = img_path.suffix.lstrip(".") or "jpg"
                 dest = carousel_dir / f"{idx}_thumbnail.{ext}"
@@ -745,8 +757,8 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
 
         media_type = "carousel"
 
-        if download_error and not carousel_items and not audio_url:
-            raise first_download_error or ExtractionError("TikTok media download failed")
+        if download_error and len(carousel_items) != len(image_entries):
+            raise first_download_error or MediaDownloadError("TikTok media download failed")
 
     else:
         video_info = _without_watermarked_formats(info)
@@ -852,8 +864,7 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
     metadata = response.model_dump()
     if audio_url:
         metadata["audio_url"] = audio_url
-    if media_type == "video":
-        metadata["_tiktok_video_cache_version"] = TIKTOK_VIDEO_CACHE_VERSION
+    metadata["_tiktok_video_cache_version"] = TIKTOK_VIDEO_CACHE_VERSION
     storage.save_metadata(video_id, metadata)
     return response
 
@@ -903,6 +914,13 @@ async def _process_scrape_request(request: ScrapeRequest):
         except Exception as e:
             stage = _error_stage(e)
             _log_request_failure(e, attempt=attempt)
+            if isinstance(e, MediaDownloadError):
+                raise _http_error(
+                    503,
+                    "media_download_failed",
+                    str(e),
+                    stage=stage,
+                ) from e
             classified = _classify_extraction_error(e)
             if isinstance(classified, ExtractionError) and _needs_oembed_probe(e):
                 probe_result = await _probe_oembed(url)
