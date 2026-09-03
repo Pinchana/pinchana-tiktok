@@ -165,13 +165,149 @@ def test_web_hd_redirect_is_routed_to_tiktok_playback_hosts():
         minimum_height=1024,
     )
 
-    assert len(formats) == 3
+    assert len(formats) == 4
     assert all(item["height"] == 1280 for item in formats)
     assert all(item["vcodec"] == "h265" for item in formats)
     assert all(item["__hd_refresh"] for item in formats)
     assert [urlsplit(item["url"]).hostname for item in formats] == [
+        "v16-webapp-prime.tiktok.com",
         "api16-normal-no1a.tiktokv.eu",
         "api16-normal-c-useast1a.tiktokv.com",
         "api22-normal-c-useast1a.tiktokv.com",
     ]
-    assert all("signaturev3=hd" in item["url"] for item in formats)
+    assert formats[0]["__direct_web"] is True
+    assert all("signaturev3=hd" in item["url"] for item in formats[1:])
+
+
+def test_direct_web_video_uses_validated_hydration_without_player_api(monkeypatch):
+    extractor = _extractor()
+    item = {
+        "id": VIDEO_ID,
+        "desc": "Direct video",
+        "author": {"uniqueId": "creator"},
+        "video": {
+            "width": 1080,
+            "height": 1920,
+            "bitrateInfo": [{
+                "GearName": "adapt_1080_1",
+                "CodecType": "h265_hvc1",
+                "Bitrate": 1_089_740,
+                "PlayAddr": {
+                    "Width": 1080,
+                    "Height": 1920,
+                    "DataSize": 1_948_319,
+                    "UrlList": [
+                        "https://v16-webapp-prime.tiktok.com/video.mp4",
+                        "https://v19-webapp-prime.tiktok.com/video.mp4",
+                        "https://www.tiktok.com/aweme/v1/play/?signaturev3=hd",
+                    ],
+                },
+            }],
+        },
+    }
+    player_calls = 0
+
+    monkeypatch.setattr(
+        extractor,
+        "_configuration_arg",
+        lambda key: ["true"] if key == "direct_web_primary" else [],
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_download_webpage_handle",
+        lambda *args, **kwargs: (
+            "<html>hydration</html>",
+            type("Handle", (), {"url": WEBPAGE_URL})(),
+        ),
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_get_universal_data",
+        lambda *_args: {
+            "webapp.video-detail": {
+                "statusCode": 0,
+                "itemInfo": {"itemStruct": item},
+            }
+        },
+    )
+
+    def player_api(*_args):
+        nonlocal player_calls
+        player_calls += 1
+        return None
+
+    monkeypatch.setattr(extractor, "_extract_player_api", player_api)
+
+    info = extractor._real_extract(WEBPAGE_URL)
+
+    assert player_calls == 0
+    assert [urlsplit(row["url"]).hostname for row in info["formats"][:2]] == [
+        "v16-webapp-prime.tiktok.com",
+        "v19-webapp-prime.tiktok.com",
+    ]
+    assert all(row["__direct_web"] for row in info["formats"][:2])
+    assert info["formats"][0]["height"] == 1920
+    assert info["formats"][0]["vcodec"] == "h265"
+
+
+def test_direct_web_mismatched_item_falls_back_to_player_api(monkeypatch):
+    extractor = _extractor()
+    monkeypatch.setattr(
+        extractor,
+        "_configuration_arg",
+        lambda key: ["true"] if key == "direct_web_primary" else [],
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_download_webpage_handle",
+        lambda *args, **kwargs: (
+            "<html>hydration</html>",
+            type("Handle", (), {"url": WEBPAGE_URL})(),
+        ),
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_get_universal_data",
+        lambda *_args: {
+            "webapp.video-detail": {
+                "statusCode": 0,
+                "itemInfo": {"itemStruct": {"id": "999", "video": {}}},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_extract_player_api",
+        lambda video_id, _url: {"id": video_id, "formats": []},
+    )
+
+    info = extractor._real_extract(WEBPAGE_URL)
+
+    assert info == {"id": VIDEO_ID, "formats": []}
+
+
+def test_photo_skips_direct_web_and_uses_player_api(monkeypatch):
+    extractor = _extractor()
+    monkeypatch.setattr(
+        extractor,
+        "_configuration_arg",
+        lambda key: ["true"] if key == "direct_web_primary" else [],
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_extract_direct_web_video",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("photo posts must not request canonical hydration")
+        ),
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_extract_player_api",
+        lambda video_id, _url: {"id": video_id, "_type": "playlist", "entries": []},
+    )
+
+    info = extractor._real_extract(
+        f"https://www.tiktok.com/@creator/photo/{VIDEO_ID}"
+    )
+
+    assert info["_type"] == "playlist"

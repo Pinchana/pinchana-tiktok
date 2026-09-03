@@ -4,7 +4,7 @@ from pinchana_tiktok import main
 
 
 class ImmediateRunner:
-    async def run(self, function, *args):
+    async def run(self, function, *args, **_kwargs):
         return function(*args)
 
 

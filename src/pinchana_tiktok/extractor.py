@@ -31,6 +31,11 @@ from yt_dlp.utils.traversal import traverse_obj
 class TikTokIE(UpstreamTikTokIE):
     """Anonymous TikTok player extractor with challenged-web fallback."""
 
+    _VALID_URL = (
+        r"https?://www\.tiktokv?\.com/"
+        r"(?:embed|(?:share|@(?P<user_id>[\w\.-]+)?)/(?P<post_type>video|photo))/"
+        r"(?P<id>\d+)"
+    )
     _PLAYER_API_URL = "https://www.tiktok.com/player/api/v1/items"
     _HD_PLAYBACK_HOSTS = (
         "api16-normal-no1a.tiktokv.eu",
@@ -160,7 +165,7 @@ class TikTokIE(UpstreamTikTokIE):
         webpage_url: str,
         minimum_height: int,
     ) -> list[dict]:
-        """Turn TikTok's signed HD playback redirects into fresh CDN mirrors."""
+        """Prefer direct CDN mirrors, retaining playback-host rewrites as fallback."""
         video = web_data.get("video") or {}
         bitrate_info = video.get("bitrateInfo") or video.get("bitRate") or []
         formats = []
@@ -171,17 +176,13 @@ class TikTokIE(UpstreamTikTokIE):
             height = int_or_none(play_addr.get("Height") or play_addr.get("height"))
             if not height or height <= minimum_height:
                 continue
-            playback_url = next(
-                (
-                    url
-                    for url in play_addr.get("UrlList") or play_addr.get("urlList") or []
-                    if url_or_none(url) and "/aweme/v1/play/" in url
-                ),
-                None,
-            )
-            if not playback_url:
+            urls = [
+                url
+                for url in play_addr.get("UrlList") or play_addr.get("urlList") or []
+                if url_or_none(url)
+            ]
+            if not urls:
                 continue
-            parsed_url = urlsplit(playback_url)
             format_name = (
                 profile.get("GearName")
                 or profile.get("gearName")
@@ -189,41 +190,126 @@ class TikTokIE(UpstreamTikTokIE):
                 or play_addr.get("urlKey")
                 or f"quality-{profile_index + 1}"
             )
-            for mirror_index, host in enumerate(self._HD_PLAYBACK_HOSTS):
+            common = {
+                "ext": "mp4",
+                "width": int_or_none(
+                    play_addr.get("Width") or play_addr.get("width")
+                ),
+                "height": height,
+                "fps": int_or_none(
+                    profile.get("BitrateFPS") or profile.get("bitrateFPS")
+                ),
+                "tbr": float_or_none(
+                    profile.get("Bitrate") or profile.get("bitrate"),
+                    scale=1000,
+                ),
+                "filesize": int_or_none(
+                    play_addr.get("DataSize") or play_addr.get("dataSize")
+                ),
+                "vcodec": self._codec_name(
+                    profile.get("CodecType") or profile.get("codecType")
+                ),
+                "acodec": "aac",
+                "http_headers": {"Referer": webpage_url},
+                "__hd_refresh": True,
+            }
+            direct_urls = [
+                media_url for media_url in urls
+                if urlsplit(media_url).hostname != "www.tiktok.com"
+            ]
+            for mirror_index, media_url in enumerate(direct_urls):
                 formats.append({
-                    "format_id": f"hd-{format_name}-{mirror_index + 1}",
-                    "format_note": "Original TikTok HD playback",
-                    "url": urlunsplit((
-                        parsed_url.scheme,
-                        host,
-                        parsed_url.path,
-                        parsed_url.query,
-                        parsed_url.fragment,
-                    )),
-                    "ext": "mp4",
-                    "width": int_or_none(
-                        play_addr.get("Width") or play_addr.get("width")
-                    ),
-                    "height": height,
-                    "fps": int_or_none(
-                        profile.get("BitrateFPS") or profile.get("bitrateFPS")
-                    ),
-                    "tbr": float_or_none(
-                        profile.get("Bitrate") or profile.get("bitrate"),
-                        scale=1000,
-                    ),
-                    "filesize": int_or_none(
-                        play_addr.get("DataSize") or play_addr.get("dataSize")
-                    ),
-                    "vcodec": self._codec_name(
-                        profile.get("CodecType") or profile.get("codecType")
-                    ),
-                    "acodec": "aac",
-                    "source_preference": len(self._HD_PLAYBACK_HOSTS) - mirror_index,
-                    "http_headers": {"Referer": webpage_url},
-                    "__hd_refresh": True,
+                    **common,
+                    "format_id": f"web-{format_name}-{mirror_index + 1}",
+                    "format_note": "TikTok web CDN",
+                    "url": self._proto_relative_url(media_url),
+                    "source_preference": len(direct_urls) - mirror_index,
+                    "__direct_web": True,
                 })
+
+            playback_url = next(
+                (media_url for media_url in urls if "/aweme/v1/play/" in media_url),
+                None,
+            )
+            if playback_url:
+                parsed_url = urlsplit(playback_url)
+                for mirror_index, host in enumerate(self._HD_PLAYBACK_HOSTS):
+                    formats.append({
+                        **common,
+                        "format_id": f"hd-{format_name}-{mirror_index + 1}",
+                        "format_note": "TikTok playback fallback",
+                        "url": urlunsplit((
+                            parsed_url.scheme,
+                            host,
+                            parsed_url.path,
+                            parsed_url.query,
+                            parsed_url.fragment,
+                        )),
+                        "preference": -10,
+                        "source_preference": (
+                            len(self._HD_PLAYBACK_HOSTS) - mirror_index
+                        ),
+                    })
         return formats
+
+    def _direct_web_primary_enabled(self) -> bool:
+        return "true" in self._configuration_arg("direct_web_primary")
+
+    def _extract_direct_web_video(
+        self,
+        url: str,
+        video_id: str,
+    ) -> dict | None:
+        """Extract a public video from one canonical-page response.
+
+        This deliberately does not solve webpage challenges or retry the page.
+        A missing, challenged, mismatched, or photo payload falls through to the
+        established player/web extraction path.
+        """
+        try:
+            response = self._download_webpage_handle(
+                url,
+                video_id,
+                "Downloading TikTok video metadata",
+                fatal=False,
+                headers=self._generate_blockbuster_headers(),
+                impersonate=True,
+            )
+        except ExtractorError as error:
+            self.report_warning(f"Direct TikTok webpage request failed: {error}")
+            return None
+        if not response:
+            return None
+
+        webpage, url_handle = response
+        if urlparse(url_handle.url).path == "/login":
+            return None
+        universal_data = self._get_universal_data(webpage, video_id)
+        status = traverse_obj(
+            universal_data,
+            ("webapp.video-detail", "statusCode", {int_or_none}),
+        )
+        item = traverse_obj(
+            universal_data,
+            ("webapp.video-detail", "itemInfo", "itemStruct", {dict}),
+        )
+        if (
+            status not in (None, 0)
+            or not item
+            or str(item.get("id")) != video_id
+            or item.get("imagePost")
+            or item.get("imagePostInfo")
+        ):
+            return None
+
+        formats = self._parse_web_hd_formats(item, url, minimum_height=0)
+        direct_formats = [item for item in formats if item.get("__direct_web")]
+        if not direct_formats:
+            return None
+
+        info = self._parse_aweme_video_web(item, url, video_id, extract_flat=True)
+        info["formats"] = formats
+        return info
 
     def _extract_web_hd_formats(
         self,
@@ -344,7 +430,15 @@ class TikTokIE(UpstreamTikTokIE):
         return self._parse_player_video(item, video_id, webpage_url)
 
     def _real_extract(self, url):
-        video_id, user_id = self._match_valid_url(url).group("id", "user_id")
+        video_id, user_id, post_type = self._match_valid_url(url).group(
+            "id", "user_id", "post_type"
+        )
+        canonical_url = self._create_url(user_id, video_id)
+        if self._direct_web_primary_enabled() and post_type != "photo":
+            direct_info = self._extract_direct_web_video(canonical_url, video_id)
+            if direct_info:
+                return direct_info
+
         player_info = self._extract_player_api(video_id, url)
         if player_info:
             if player_info.get("formats"):
@@ -355,7 +449,6 @@ class TikTokIE(UpstreamTikTokIE):
                     ),
                     default=0,
                 )
-                canonical_url = self._create_url(user_id, video_id)
                 player_info["formats"] = [
                     *self._extract_web_hd_formats(
                         canonical_url,

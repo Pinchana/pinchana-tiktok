@@ -1,0 +1,149 @@
+{
+  "date": "2026-09-03",
+  "source_commit": "0ee4b29034177f5a959db7cedbcfcffbaff16761",
+  "yt_dlp_version": "2026.08.19",
+  "scope": "Public logged-out metadata and one-byte media probes from one Europe-hosted egress; no login/private/mobile flows",
+  "har": {
+    "entries": 497,
+    "short_document": {
+      "status": 301,
+      "http_version": "HTTP/1.1",
+      "dns_ms": 5213.792,
+      "connect_ms": 5298.682,
+      "ssl_ms": 58.578,
+      "wait_ms": 223.148,
+      "receive_ms": 0.954,
+      "har_time_ms": 10737.31
+    },
+    "canonical_document": {
+      "status": 200,
+      "http_version": "HTTP/2",
+      "dns_ms": 203.291,
+      "connect_ms": 409.973,
+      "ssl_ms": 104.362,
+      "wait_ms": 408.648,
+      "receive_ms": 66.957,
+      "har_time_ms": 1089.546,
+      "response_body_bytes": 397247
+    },
+    "wall_clock_between_document_starts_ms": 5524.0,
+    "request_cookie_names": [],
+    "hydration_path": "__DEFAULT_SCOPE__.webapp.video-detail.itemInfo.itemStruct",
+    "video_renditions": [
+      {"width": 1080, "height": 1920, "codec": "h265", "bitrate_kbps": 1089.74, "filesize_bytes": 1948319, "mirror_hosts": ["v16-webapp-prime.tiktok.com", "v19-webapp-prime.tiktok.com", "www.tiktok.com"]},
+      {"width": 720, "height": 1280, "codec": "h265", "bitrate_kbps": 640.414, "filesize_bytes": 1144981, "mirror_hosts": ["v16-webapp-prime.tiktok.com", "v19-webapp-prime.tiktok.com", "www.tiktok.com"]},
+      {"width": 576, "height": 1024, "codec": "h264", "bitrate_kbps": 796.339, "filesize_bytes": 1423756, "mirror_hosts": ["v16-webapp-prime.tiktok.com", "v19-webapp-prime.tiktok.com", "www.tiktok.com"]},
+      {"width": 576, "height": 1024, "codec": "h265", "bitrate_kbps": 466.87, "filesize_bytes": 834706, "mirror_hosts": ["v16-webapp-prime.tiktok.com", "v19-webapp-prime.tiktok.com", "www.tiktok.com"]}
+    ]
+  },
+  "canonical_metadata_benchmark_ms": {
+    "direct_one_get": [644.937, 617.943, 594.134, 585.134, 686.944],
+    "current_player_plus_web_interval_0": [1229.269, 1265.558, 1264.87, 1088.528, 1151.616],
+    "direct_median": 617.943,
+    "current_median": 1229.269,
+    "median_reduction_percent": 49.73
+  },
+  "short_metadata_benchmark_ms": {
+    "direct_redirect": [523.317, 392.982, 387.948],
+    "direct_canonical": [719.351, 619.888, 820.689],
+    "direct_total": [1242.668, 1012.87, 1208.637],
+    "current_interval_0_single_run": 2509.861,
+    "current_interval_2_excluding_global_runner_single_run": 6909.689
+  },
+  "pacing": {
+    "default_interval_seconds": 2.0,
+    "canonical_current_internal_floor_seconds": 2.0,
+    "short_current_internal_floor_seconds": 4.0,
+    "short_runner_additional_floor_when_redirect_is_faster_than_interval": "max(0, 2.0 - redirect_operation_seconds)"
+  },
+  "media_probes": {
+    "range": "bytes=0-0",
+    "best_rendition_bytes": 1948319,
+    "direct_v16": {"status": 206, "redirects": 0, "content_type": "video/mp4", "total_size_confirmed": 1948319},
+    "direct_v19": {"status": 206, "redirects": 0, "content_type": "video/mp4", "total_size_confirmed": 1948319},
+    "www_aweme_play": {"status": 200, "redirects": 1, "final_route": "/404", "content_type": "text/html"},
+    "rewritten_playback_hosts": {"tested": 3, "successful_206": 3, "behavior": "302 to a TikTok CDN"},
+    "full_file_stream_verification": {
+      "renditions_tested": 4,
+      "all_declared_sizes_matched": true,
+      "all_had_aac_audio": true,
+      "video_streams": ["1080x1920 hevc", "720x1280 hevc", "576x1024 h264", "576x1024 hevc"],
+      "temporary_files_removed": true
+    }
+  },
+  "coverage": {
+    "canonical_videos_with_usable_ssr": 3,
+    "repeated_primary_video_runs": 7,
+    "photo_url_with_player_api_success": {
+      "item_id": "7479037796326362385",
+      "metadata_requests": 1,
+      "photo_entries": 5,
+      "audio_entries": 1
+    },
+    "same_photo_url_ssr": "HTTP 200 but no webapp.video-detail in hydration"
+  },
+  "photo_har_followup": {
+    "carousel": {
+      "entries": 435,
+      "short_to_canonical_start_ms": 149.0,
+      "canonical_document_ms": 368.784,
+      "item_detail_start_after_canonical_ms": 1669.0,
+      "item_detail_ms": 230.033,
+      "estimated_short_start_to_item_detail_complete_ms": 2048.033,
+      "images": 3,
+      "image_dimensions": ["864x1536", "864x1536", "864x1536"],
+      "audio_duration_seconds": 60
+    },
+    "single_image": {
+      "entries": 407,
+      "short_to_canonical_start_ms": 129.0,
+      "canonical_document_ms": 474.219,
+      "item_detail_start_after_canonical_ms": 1702.0,
+      "item_detail_ms": 241.801,
+      "estimated_short_start_to_item_detail_complete_ms": 2072.801,
+      "images": 1,
+      "image_dimensions": ["1080x1439"],
+      "audio_duration_seconds": 19
+    },
+    "canonical_hydration": {
+      "usable_item_struct": false,
+      "available_scopes": ["seo.abtest", "webapp.a-b", "webapp.app-context", "webapp.biz-context", "webapp.i18n-translation"]
+    },
+    "browser_item_detail": {
+      "path": "/api/item/detail/",
+      "http_version": "HTTP/2",
+      "request_cookies": [],
+      "contains_signed_query": true,
+      "payload_path": "itemInfo.itemStruct.imagePost.images",
+      "image_mirrors": ["p16-common-sign.tiktokcdn-eu.com", "p19-common-sign.tiktokcdn-eu.com"],
+      "image_type": "image/jpeg",
+      "captured_query_replay_with_captured_chrome_152_ua": "usable",
+      "same_query_without_ua": "HTTP 200 empty",
+      "same_query_with_chrome_136_ua": "HTTP 200 empty",
+      "interpretation": "The captured signed request is UA-sensitive; naive query ablation invalidates its signature and cannot identify independent optional parameters."
+    },
+    "player_api_canonical_controls": {
+      "carousel": {"elapsed_ms": 429.147, "requests": 1, "images": 3, "audio_entries": 1},
+      "single_image": {"elapsed_ms": 446.316, "requests": 1, "images": 1, "audio_entries": 1},
+      "matched_browser_order_and_dimensions": true,
+      "first_image_variants": ["image/webp", "image/jpeg"]
+    },
+    "optimized_short_location_plus_player_ms": {
+      "carousel": [875.178, 890.656, 892.743],
+      "single_image": [905.632, 886.576, 682.588],
+      "requests": 2,
+      "current_short_interval_0_single_runs": {"carousel": 1149.007, "single_image": 1147.683},
+      "current_short_interval_2_excluding_global_runner_carousel": 3438.244
+    },
+    "image_range_probes": {
+      "carousel_jpeg_mirrors": {"p16_status": 206, "p19_status": 206, "total_bytes_each": 370593},
+      "single_image_jpeg_mirrors": {"p16_status": 206, "p19_status": 206, "total_bytes_each": 190528}
+    }
+  },
+  "secrets": {
+    "har_committed": false,
+    "raw_response_committed": false,
+    "signed_urls_committed": false,
+    "cookies_or_tokens_committed": false
+  }
+}

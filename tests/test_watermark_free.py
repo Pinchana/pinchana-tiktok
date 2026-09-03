@@ -178,6 +178,49 @@ def test_format_order_reserves_player_fallback_after_hd_mirrors(monkeypatch):
     ]
 
 
+def test_format_order_prefers_direct_cdn_before_playback_rewrite(monkeypatch):
+    monkeypatch.setenv("TIKTOK_FORMAT_ATTEMPTS", "3")
+    ydl = YoutubeDL({"quiet": True, "no_warnings": True})
+    info = {
+        "formats": [
+            {
+                "format_id": "playback-fallback",
+                "url": "https://api16-normal-no1a.tiktokv.eu/aweme/v1/play/",
+                "ext": "mp4",
+                "height": 1920,
+                "preference": -10,
+                "__hd_refresh": True,
+            },
+            {
+                "format_id": "direct-v16",
+                "url": "https://v16-webapp-prime.tiktok.com/video.mp4",
+                "ext": "mp4",
+                "height": 1920,
+                "source_preference": 2,
+                "__hd_refresh": True,
+                "__direct_web": True,
+            },
+            {
+                "format_id": "direct-v19",
+                "url": "https://v19-webapp-prime.tiktok.com/video.mp4",
+                "ext": "mp4",
+                "height": 1920,
+                "source_preference": 1,
+                "__hd_refresh": True,
+                "__direct_web": True,
+            },
+        ],
+    }
+
+    ordered = main._ordered_video_formats(info, ydl)
+
+    assert [item["format_id"] for item in ordered] == [
+        "direct-v16",
+        "direct-v19",
+        "playback-fallback",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_hevc_video_is_converted_to_share_compatible_h264(monkeypatch, tmp_path):
     source = tmp_path / "video.mp4"

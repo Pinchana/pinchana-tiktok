@@ -4,6 +4,7 @@ import time
 import pytest
 
 from pinchana_tiktok import main
+from pinchana_tiktok import api
 from pinchana_tiktok.api import TikTokScraper
 from pinchana_tiktok.extractor import TikTokIE
 from yt_dlp import YoutubeDL
@@ -12,11 +13,13 @@ from yt_dlp import YoutubeDL
 def test_scraper_session_uses_configured_transport(monkeypatch):
     monkeypatch.setenv("TIKTOK_PROXY_URL", "http://gluetun:8888")
     monkeypatch.setenv("TIKTOK_REQUEST_INTERVAL_SECONDS", "0.25")
+    monkeypatch.setenv("TIKTOK_INTERNAL_REQUEST_INTERVAL_SECONDS", "0.05")
 
     scraper = TikTokScraper()
 
     assert scraper._ydl.params["proxy"] == "http://gluetun:8888"
-    assert scraper._ydl.params["sleep_interval_requests"] == 0.25
+    assert scraper._ydl.params["sleep_interval_requests"] == 0.05
+    assert api.request_interval_seconds() == 0.25
 
 
 def test_download_temporarily_reuses_extraction_ydl(monkeypatch, tmp_path):
@@ -112,7 +115,7 @@ def test_share_urls_use_upstream_numeric_id_without_redirect(monkeypatch, url):
     }
 
 
-def test_photo_url_is_normalized_only_for_upstream_matching(monkeypatch):
+def test_photo_url_is_preserved_for_direct_type_routing(monkeypatch):
     scraper = TikTokScraper()
     observed = {}
 
@@ -128,8 +131,84 @@ def test_photo_url_is_normalized_only_for_upstream_matching(monkeypatch):
 
     assert info["id"] == "7663781221171776789"
     assert observed["url"] == (
-        "https://www.tiktok.com/@creator/video/7663781221171776789"
+        "https://www.tiktok.com/@creator/photo/7663781221171776789"
     )
+
+
+def test_direct_short_resolver_stops_at_first_location(monkeypatch):
+    canonical = "https://www.tiktok.com/@creator/photo/7663781221171776789?_t=track"
+    observed = {}
+
+    class Response:
+        is_redirect = True
+        headers = {"location": canonical}
+
+    class Client:
+        def __init__(self, **kwargs):
+            observed["options"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def get(self, url):
+            observed["url"] = url
+            return Response()
+
+    monkeypatch.setenv("TIKTOK_DIRECT_WEB_PRIMARY", "true")
+    monkeypatch.setattr(api.httpx, "Client", Client)
+
+    result = TikTokScraper().resolve_short_url("https://vt.tiktok.com/short")
+
+    assert result == canonical
+    assert observed["url"] == "https://vt.tiktok.com/short"
+    assert observed["options"]["follow_redirects"] is False
+
+
+def test_feature_flag_is_passed_to_custom_extractor(monkeypatch):
+    monkeypatch.setenv("TIKTOK_DIRECT_WEB_PRIMARY", "true")
+
+    scraper = TikTokScraper()
+
+    assert scraper._ydl.params["extractor_args"]["tiktok"][
+        "direct_web_primary"
+    ] == ["true"]
+
+
+@pytest.mark.asyncio
+async def test_short_resolution_and_extraction_are_one_paced_job(monkeypatch):
+    pace_values = []
+
+    class Runner:
+        async def run(self, function, *args, pace=True):
+            pace_values.append(pace)
+            return function(*args)
+
+    class Scraper:
+        _ydl = YoutubeDL({"quiet": True, "no_warnings": True})
+
+        def resolve_short_url(self, _url):
+            return "https://www.tiktok.com/@creator/video/7663781221171776789"
+
+        def extract_video(self, _url):
+            return {"id": "7663781221171776789"}
+
+    async def build(_video_id, info, _scraper):
+        return info
+
+    monkeypatch.setattr(main, "UPSTREAM_RUNNER", Runner())
+    monkeypatch.setattr(main, "TikTokScraper", Scraper)
+    monkeypatch.setattr(main.storage, "is_cached", lambda _post_id: False)
+    monkeypatch.setattr(main, "_download_and_build_response", build)
+
+    result = await main._process_scrape_request(
+        type("Request", (), {"url": "https://vt.tiktok.com/short"})()
+    )
+
+    assert result["id"] == "7663781221171776789"
+    assert pace_values == [True, False]
 
 
 @pytest.mark.asyncio
