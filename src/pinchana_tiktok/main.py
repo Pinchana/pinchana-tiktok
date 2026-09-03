@@ -42,7 +42,7 @@ TIKTOK_VIDEO_CACHE_VERSION = 3
 
 
 class TikTokUpstreamRunner:
-    """Bound blocking yt-dlp work and pace starts across all requests."""
+    """Bound blocking TikTok work and pace independent scrape-job starts."""
 
     def __init__(self, concurrency: int, interval: float):
         self._limit = asyncio.Semaphore(max(1, concurrency))
@@ -50,13 +50,14 @@ class TikTokUpstreamRunner:
         self._interval = max(0.0, interval)
         self._last_started = 0.0
 
-    async def run(self, function, *args):
+    async def run(self, function, *args, pace: bool = True):
         async with self._limit:
-            async with self._pace_lock:
-                delay = self._interval - (time.monotonic() - self._last_started)
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                self._last_started = time.monotonic()
+            if pace:
+                async with self._pace_lock:
+                    delay = self._interval - (time.monotonic() - self._last_started)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    self._last_started = time.monotonic()
             return await asyncio.to_thread(function, *args)
 
 
@@ -213,6 +214,7 @@ async def _download_with_ydl_bounded(
         info,
         options,
         extract_audio_mp3,
+        pace=False,
     )
 
 
@@ -876,6 +878,7 @@ async def _process_scrape_request(request: ScrapeRequest):
     media_refresh_used = False
     vpn_reconnect_used = False
     transport_retry_used = False
+    job_paced = False
 
     for attempt in range(1, TIKTOK_MAX_ATTEMPTS + 1):
         scraper = TikTokScraper()
@@ -888,7 +891,12 @@ async def _process_scrape_request(request: ScrapeRequest):
             ):
                 short_url = url
                 try:
-                    url = await UPSTREAM_RUNNER.run(scraper.resolve_short_url, url)
+                    url = await UPSTREAM_RUNNER.run(
+                        scraper.resolve_short_url,
+                        url,
+                        pace=not job_paced,
+                    )
+                    job_paced = True
                 except Exception as e:
                     raise _request_error("short_url", e, url=short_url) from e
                 url = canonicalize_tiktok_url(url)
@@ -905,7 +913,12 @@ async def _process_scrape_request(request: ScrapeRequest):
 
             logger.info(f"Scraping TikTok: {video_id} (attempt {attempt})")
             try:
-                info = await UPSTREAM_RUNNER.run(scraper.extract_video, url)
+                info = await UPSTREAM_RUNNER.run(
+                    scraper.extract_video,
+                    url,
+                    pace=not job_paced,
+                )
+                job_paced = True
             except Exception as e:
                 raise _request_error("webpage", e, url=url) from e
             return await _download_and_build_response(video_id, info, scraper)

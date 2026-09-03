@@ -33,6 +33,7 @@ def _cookie(name="ttwid", value="session-value"):
 
 def test_session_cache_reuses_cookies_without_mobile_identity(monkeypatch):
     monkeypatch.setenv("TIKTOK_REQUEST_INTERVAL_SECONDS", "0.75")
+    monkeypatch.setenv("TIKTOK_INTERNAL_REQUEST_INTERVAL_SECONDS", "0.1")
     monkeypatch.setenv("TIKTOK_PROXY_URL", "http://proxy.example:8888")
     cache = TikTokSessionCache()
 
@@ -46,7 +47,7 @@ def test_session_cache_reuses_cookies_without_mobile_identity(monkeypatch):
         for cookie in second._ydl.cookiejar
     }
     assert second_cookies[(".tiktok.com", "/", "ttwid")] == "session-value"
-    assert second._ydl.params["sleep_interval_requests"] == 0.75
+    assert second._ydl.params["sleep_interval_requests"] == 0.1
     assert second._ydl.params["proxy"] == "http://proxy.example:8888"
     assert "device_id" not in second._ydl.params["extractor_args"]["tiktok"]
     assert "app_info" not in second._ydl.params["extractor_args"]["tiktok"]

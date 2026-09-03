@@ -4,10 +4,10 @@ This FastAPI module extracts supported public TikTok posts through a dedicated y
 
 ## Processing flow
 
-1. Resolve supported canonical and short TikTok URLs.
-2. Request reliable media mirrors from TikTok's anonymous player endpoint and discover higher-resolution renditions from its webpage metadata when available.
-3. Refresh signed HD playback through TikTok-owned redirect hosts, then preserve the anonymous player URL as an independent fallback.
-4. Reuse anonymous cookies, pace upstream work globally, and retry temporary failures within a bounded policy.
+1. When `TIKTOK_DIRECT_WEB_PRIMARY` is enabled, resolve short TikTok URLs from their first redirect without downloading the destination page.
+2. In the same mode, extract ordinary videos from the canonical page's hydration payload in one metadata request and use its direct CDN mirrors.
+3. Use TikTok's anonymous player endpoint as the primary photo-post path and as the established video fallback; retain TikTok playback-host rewrites as a final media fallback.
+4. Reuse anonymous cookies, pace independent scrape jobs globally, and retry temporary failures within a bounded policy.
 5. When the deployment-wide VPN is enabled, rotate Gluetun once after a confirmed platform block.
 6. Download ordered media to `/app/cache/tiktok/{post_id}` in containers.
 
@@ -27,7 +27,9 @@ External clients should call the gateway's authenticated `POST /v1/scrape` route
 | `CACHE_PATH` | `./cache` | Base media cache path |
 | `CACHE_MAX_SIZE_GB` | `10.0` | Maximum cache size before eviction |
 | `YTDLP_CONCURRENCY` | `1` | Maximum concurrent yt-dlp operations |
-| `TIKTOK_REQUEST_INTERVAL_SECONDS` | `2.0` | Minimum delay between upstream request starts |
+| `TIKTOK_DIRECT_WEB_PRIMARY` | `false` | Enable one-page video extraction and first-redirect short URL resolution |
+| `TIKTOK_REQUEST_INTERVAL_SECONDS` | `2.0` | Minimum delay between independent TikTok job starts |
+| `TIKTOK_INTERNAL_REQUEST_INTERVAL_SECONDS` | `0` | Optional delay between requests inside one job; keep `0` unless block-rate data requires it |
 | `TIKTOK_RETRY_DELAY_SECONDS` | `2.0` | Delay before retrying a web challenge with a fresh anonymous session |
 | `TIKTOK_FORMAT_ATTEMPTS` | `3` | Maximum watermark-free video formats attempted before refreshing media URLs |
 | `TIKTOK_TRANSCODE_HEVC` | `false` | Optionally convert HEVC HD renditions to H.264 for legacy clients; native Telegram apps normally do not need this |

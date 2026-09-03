@@ -9,7 +9,9 @@ import threading
 import time
 from http.cookiejar import Cookie
 from typing import Iterator
+from urllib.parse import urljoin, urlsplit
 
+import httpx
 from yt_dlp import YoutubeDL
 
 from .extractor import TikTokIE, TikTokLiveIE, TikTokUserIE, TikTokVMIE
@@ -22,7 +24,25 @@ DEFAULT_YDL_OPTS = {
 
 
 def request_interval_seconds() -> float:
+    """Minimum spacing between independent TikTok jobs."""
     return max(0.0, float(os.getenv("TIKTOK_REQUEST_INTERVAL_SECONDS", "2.0")))
+
+
+def internal_request_interval_seconds() -> float:
+    """Optional delay between requests inside one extraction job."""
+    return max(
+        0.0,
+        float(os.getenv("TIKTOK_INTERNAL_REQUEST_INTERVAL_SECONDS", "0")),
+    )
+
+
+def direct_web_primary_enabled() -> bool:
+    return os.getenv("TIKTOK_DIRECT_WEB_PRIMARY", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def proxy_url() -> str | None:
@@ -31,7 +51,7 @@ def proxy_url() -> str | None:
 
 def transport_ydl_opts() -> dict:
     """Options shared by extraction and every media download request."""
-    options = {"sleep_interval_requests": request_interval_seconds()}
+    options = {"sleep_interval_requests": internal_request_interval_seconds()}
     if configured_proxy := proxy_url():
         options["proxy"] = configured_proxy
     return options
@@ -95,6 +115,12 @@ class TikTokScraper:
         tiktok_args = extractor_args.setdefault("tiktok", {})
         tiktok_args.pop("device_id", None)
         tiktok_args.pop("app_info", None)
+        if direct_web_primary_enabled():
+            tiktok_args["direct_web_primary"] = ["true"]
+        self._direct_web_primary = "true" in {
+            str(value).lower()
+            for value in tiktok_args.get("direct_web_primary", [])
+        }
         self._session_cache = session_cache
         self._ydl_opts = {
             **DEFAULT_YDL_OPTS,
@@ -116,13 +142,9 @@ class TikTokScraper:
             For photo slideshows the dict will have ``_type: "playlist"``
             with image entries.
         """
-        # TikTokIE owns URL routing, including /share/video URLs.  A photo post
-        # is served by the same canonical endpoint, so only normalize that
-        # Pinchana-specific spelling before handing it over.
-        extractor_url = re.sub(r"(/@[\w.-]*/|/share/)photo/", r"\1video/", url)
         ie = TikTokIE(self._ydl)
         try:
-            info = ie.extract(extractor_url)
+            info = ie.extract(url)
         finally:
             self._session_cache.capture(self._ydl)
         # yt-dlp expects these fields when the info dict is later passed
@@ -189,6 +211,30 @@ class TikTokScraper:
         Returns:
             Canonical TikTok URL.
         """
+        if self._direct_web_primary:
+            try:
+                with httpx.Client(
+                    follow_redirects=False,
+                    proxy=self._ydl.params.get("proxy"),
+                    timeout=20.0,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                ) as client:
+                    response = client.get(url)
+                location = response.headers.get("location")
+                canonical = urljoin(url, location) if location else ""
+                hostname = (urlsplit(canonical).hostname or "").lower()
+                if (
+                    response.is_redirect
+                    and (hostname == "tiktok.com" or hostname.endswith(".tiktok.com"))
+                    and re.search(r"/(?:video|photo)/\d+", urlsplit(canonical).path)
+                ):
+                    return canonical
+            except httpx.HTTPError:
+                pass
+
         ie = TikTokVMIE(self._ydl)
         try:
             result = ie.extract(url)
