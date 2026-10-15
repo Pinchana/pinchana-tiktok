@@ -13,14 +13,68 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import ExtractorError
 
-from .extractor import TikTokIE, TikTokLiveIE, TikTokUserIE, TikTokVMIE
+from .extractor import TikTokIE, TikTokLiveIE, TikTokUserIE
 
 
 DEFAULT_YDL_OPTS = {
     "quiet": True,
     "no_warnings": True,
 }
+
+
+TT_SITE_HOSTS = {"tt.site", "www.tt.site"}
+_POST_HOSTS = {"tiktok.com", "www.tiktok.com", "m.tiktok.com"}
+_MAX_SHORT_URL_REQUESTS = 3
+
+
+def _safe_web_url(url: str, *, https_only: bool = False) -> bool:
+    try:
+        parsed = urlsplit(url)
+        return (
+            parsed.scheme in ({"https"} if https_only else {"http", "https"})
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.port in (None, 443 if parsed.scheme == "https" else 80)
+        )
+    except ValueError:
+        return False
+
+
+def is_short_tiktok_url(url: str) -> bool:
+    """Recognize only known TikTok share hosts and short-link paths."""
+    if not _safe_web_url(url):
+        return False
+    parsed = urlsplit(url)
+    hostname = (parsed.hostname or "").lower()
+    if hostname in TT_SITE_HOSTS or hostname in _POST_HOSTS:
+        return re.fullmatch(r"/t/[\w-]+/?", parsed.path) is not None
+    short_host = hostname == "t.tiktok.com" or re.fullmatch(r"v[a-z]\.tiktok\.com", hostname)
+    return bool(short_host and re.fullmatch(r"/[\w-]+/?", parsed.path))
+
+
+def _is_tiktok_post_url(url: str) -> bool:
+    if not _safe_web_url(url, https_only=True):
+        return False
+    parsed = urlsplit(url)
+    return (
+        (parsed.hostname or "").lower() in _POST_HOSTS
+        and re.fullmatch(
+            r"/(?:@[\w.-]+/(?:video|photo)|share/video|v|video|photo)/\d+/?",
+            parsed.path,
+        ) is not None
+    )
+
+
+def _short_request_url(url: str) -> str:
+    parsed = urlsplit(url)
+    # The apex tt.site may have no DNS record; keep the working www host.
+    hostname = (parsed.hostname or "").lower()
+    if hostname in TT_SITE_HOSTS:
+        hostname = "www.tt.site"
+    return parsed._replace(scheme="https", netloc=hostname, fragment="").geturl()
 
 
 def request_interval_seconds() -> float:
@@ -203,44 +257,60 @@ class TikTokScraper:
             self._session_cache.capture(self._ydl)
 
     def resolve_short_url(self, url: str) -> str:
-        """Expand a short TikTok URL (vm.tiktok.com, vt.tiktok.com, etc.).
+        """Resolve known share URLs without fetching the destination post.
 
-        Args:
-            url: Short TikTok URL.
-
-        Returns:
-            Canonical TikTok URL.
+        Independent of the video extraction feature flag. Each redirect is
+        checked before another request; arbitrary hosts and non-post targets
+        are never followed.
         """
-        if self._direct_web_primary:
-            try:
-                with httpx.Client(
-                    follow_redirects=False,
-                    proxy=self._ydl.params.get("proxy"),
-                    timeout=20.0,
-                    headers={
-                        "User-Agent": "Mozilla/5.0",
-                        "Accept-Language": "en-US,en;q=0.9",
-                    },
-                ) as client:
-                    response = client.get(url)
-                location = response.headers.get("location")
-                canonical = urljoin(url, location) if location else ""
-                hostname = (urlsplit(canonical).hostname or "").lower()
-                if (
-                    response.is_redirect
-                    and (hostname == "tiktok.com" or hostname.endswith(".tiktok.com"))
-                    and re.search(r"/(?:video|photo)/\d+", urlsplit(canonical).path)
-                ):
-                    return canonical
-            except httpx.HTTPError:
-                pass
+        if not is_short_tiktok_url(url):
+            raise ExtractorError("Unsupported TikTok short URL", expected=True)
 
-        ie = TikTokVMIE(self._ydl)
-        try:
-            result = ie.extract(url)
-        finally:
-            self._session_cache.capture(self._ydl)
-        return result.get("url", url)
+        current = _short_request_url(url)
+        visited: set[str] = set()
+        with httpx.Client(
+            follow_redirects=False,
+            proxy=self._ydl.params.get("proxy"),
+            timeout=20.0,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        ) as client:
+            for _ in range(_MAX_SHORT_URL_REQUESTS):
+                if current in visited:
+                    raise ExtractorError("TikTok short URL redirect loop", expected=True)
+                visited.add(current)
+                try:
+                    response = client.get(current)
+                except httpx.InvalidURL as exc:
+                    raise ExtractorError("Invalid TikTok short URL redirect", expected=True) from exc
+                location = response.headers.get("location")
+                if not response.is_redirect:
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        # Keep the yt-dlp-style status text understood by the
+                        # service's existing not-found / rate-limit classifier.
+                        raise ExtractorError(
+                            f"HTTP Error {response.status_code}: {response.reason_phrase}",
+                            cause=exc,
+                        ) from exc
+                if not response.is_redirect or not location:
+                    raise ExtractorError(
+                        "TikTok short URL did not redirect to a post", expected=True,
+                    )
+                try:
+                    target = urljoin(current, location)
+                except ValueError as exc:
+                    raise ExtractorError("Invalid TikTok short URL redirect", expected=True) from exc
+                if _is_tiktok_post_url(target):
+                    return target
+                if not _safe_web_url(target, https_only=True) or not is_short_tiktok_url(target):
+                    raise ExtractorError("Invalid TikTok short URL redirect", expected=True)
+                current = _short_request_url(target)
+
+        raise ExtractorError("Too many TikTok short URL redirects", expected=True)
 
 
 # Module-level convenience functions -----------------------------------------

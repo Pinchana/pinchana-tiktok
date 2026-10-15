@@ -178,7 +178,13 @@ def test_feature_flag_is_passed_to_custom_extractor(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_short_resolution_and_extraction_are_one_paced_job(monkeypatch):
+@pytest.mark.parametrize("short_url", [
+    "https://vt.tiktok.com/short",
+    "https://www.tt.site/t/ZGdC5nG4S/",
+    "https://tt.site/t/ZGdC5nG4S/",
+])
+@pytest.mark.parametrize("kind", ["video", "photo"])
+async def test_short_resolution_and_extraction_are_one_paced_job(monkeypatch, short_url, kind):
     pace_values = []
 
     class Runner:
@@ -189,13 +195,16 @@ async def test_short_resolution_and_extraction_are_one_paced_job(monkeypatch):
     class Scraper:
         _ydl = YoutubeDL({"quiet": True, "no_warnings": True})
 
-        def resolve_short_url(self, _url):
-            return "https://www.tiktok.com/@creator/video/7663781221171776789"
+        def resolve_short_url(self, url):
+            assert url == short_url
+            return f"https://www.tiktok.com/@creator/{kind}/7663781221171776789?_t=tracking"
 
-        def extract_video(self, _url):
+        def extract_video(self, url):
+            assert url == f"https://www.tiktok.com/@creator/{kind}/7663781221171776789"
             return {"id": "7663781221171776789"}
 
-    async def build(_video_id, info, _scraper):
+    async def build(video_id, info, _scraper):
+        assert video_id == "7663781221171776789"
         return info
 
     monkeypatch.setattr(main, "UPSTREAM_RUNNER", Runner())
@@ -204,7 +213,7 @@ async def test_short_resolution_and_extraction_are_one_paced_job(monkeypatch):
     monkeypatch.setattr(main, "_download_and_build_response", build)
 
     result = await main._process_scrape_request(
-        type("Request", (), {"url": "https://vt.tiktok.com/short"})()
+        type("Request", (), {"url": short_url})()
     )
 
     assert result["id"] == "7663781221171776789"

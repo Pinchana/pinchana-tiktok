@@ -4,8 +4,8 @@ This FastAPI module extracts supported public TikTok posts through a dedicated y
 
 ## Processing flow
 
-1. When `TIKTOK_DIRECT_WEB_PRIMARY` is enabled, resolve short TikTok URLs from their first redirect without downloading the destination page.
-2. In the same mode, extract ordinary videos from the canonical page's hydration payload in one metadata request and use its direct CDN mirrors.
+1. Resolve short TikTok URLs (`vm.tiktok.com`, `vt.tiktok.com`, `www.tiktok.com/t/`, and `www.tt.site/t/`) with bounded, validated HTTP redirects, without downloading the destination page. This works independently of `TIKTOK_DIRECT_WEB_PRIMARY`; bare `tt.site` links are requested through `www.tt.site`.
+2. When `TIKTOK_DIRECT_WEB_PRIMARY` is enabled, extract ordinary videos from the canonical page's hydration payload in one metadata request and use its direct CDN mirrors.
 3. Use TikTok's anonymous player endpoint as the primary photo-post path and as the established video fallback; retain TikTok playback-host rewrites as a final media fallback.
 4. Reuse anonymous cookies, pace independent scrape jobs globally, and retry temporary failures within a bounded policy.
 5. When the deployment-wide VPN is enabled, rotate Gluetun once after a confirmed platform block.
@@ -15,7 +15,7 @@ The gateway's API v1 response represents slideshow images as ordered `content` a
 
 ## API
 
-- `POST /scrape` accepts `{"url":"https://www.tiktok.com/@account/video/POST_ID"}`.
+- `POST /scrape` accepts `{"url":"https://www.tiktok.com/@account/video/POST_ID"}` or a supported short link such as `{"url":"https://www.tt.site/t/SHORT_CODE/"}`.
 - `GET /health` reports module and VPN readiness.
 
 External clients should call the gateway's authenticated `POST /v1/scrape` route.
@@ -27,7 +27,7 @@ External clients should call the gateway's authenticated `POST /v1/scrape` route
 | `CACHE_PATH` | `./cache` | Base media cache path |
 | `CACHE_MAX_SIZE_GB` | `10.0` | Maximum cache size before eviction |
 | `YTDLP_CONCURRENCY` | `1` | Maximum concurrent yt-dlp operations |
-| `TIKTOK_DIRECT_WEB_PRIMARY` | `false` | Enable one-page video extraction and first-redirect short URL resolution |
+| `TIKTOK_DIRECT_WEB_PRIMARY` | `false` | Enable one-page video extraction (short URL resolution is always enabled) |
 | `TIKTOK_REQUEST_INTERVAL_SECONDS` | `2.0` | Minimum delay between independent TikTok job starts |
 | `TIKTOK_INTERNAL_REQUEST_INTERVAL_SECONDS` | `0` | Optional delay between requests inside one job; keep `0` unless block-rate data requires it |
 | `TIKTOK_RETRY_DELAY_SECONDS` | `2.0` | Delay before retrying a web challenge with a fresh anonymous session |

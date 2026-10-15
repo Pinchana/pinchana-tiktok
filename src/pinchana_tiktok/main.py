@@ -17,6 +17,7 @@ from pinchana_core.plugins import ScraperPlugin, registry
 from pinchana_core.vpn import GluetunController
 from .api import (
     TikTokScraper,
+    is_short_tiktok_url,
     proxy_url,
     request_interval_seconds,
     tiktok_session_cache,
@@ -883,12 +884,7 @@ async def _process_scrape_request(request: ScrapeRequest):
     for attempt in range(1, TIKTOK_MAX_ATTEMPTS + 1):
         scraper = TikTokScraper()
         try:
-            if (
-                "vm.tiktok.com" in url
-                or "vt.tiktok.com" in url
-                or re.search(r"v[a-z]\.tiktok\.com", url)
-                or "/t/" in url
-            ):
+            if is_short_tiktok_url(url):
                 short_url = url
                 try:
                     url = await UPSTREAM_RUNNER.run(
@@ -1072,7 +1068,7 @@ async def health_check():
 registry.register(ScraperPlugin(
     name="tiktok",
     router=router,
-    route_patterns=["tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "v*.tiktok.com"],
+    route_patterns=["tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "v*.tiktok.com", "tt.site"],
 ))
 
 @asynccontextmanager
