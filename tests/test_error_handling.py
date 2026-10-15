@@ -148,6 +148,27 @@ def test_extractor_errors_are_classified_without_broad_unavailable_matching(
     assert isinstance(main._classify_extraction_error(RuntimeError(message)), exception_type)
 
 
+@pytest.mark.parametrize("status", [500, 502, 503, 504, 520])
+def test_structured_5xx_status_survives_extractor_wrappers(status):
+    import httpx
+    from yt_dlp.utils import ExtractorError
+
+    response = httpx.Response(status, request=httpx.Request("GET", "https://www.tt.site/t/code"))
+    source = httpx.HTTPStatusError("upstream failed", request=response.request, response=response)
+    wrapped = ExtractorError("short-link request failed", cause=source, expected=True)
+    error = main.TikTokRequestError("short_url", wrapped, url=str(response.request.url))
+
+    assert error.status_code == status
+    assert isinstance(main._classify_extraction_error(error), main.UpstreamUnavailableError)
+
+
+def test_empty_transport_error_is_temporary():
+    import httpx
+
+    error = main.TikTokRequestError("short_url", httpx.ConnectError(""))
+    assert isinstance(main._classify_extraction_error(error), main.UpstreamUnavailableError)
+
+
 def test_media_404_is_classified_as_refreshable_with_stage_context():
     error = main.TikTokRequestError(
         "video_download",

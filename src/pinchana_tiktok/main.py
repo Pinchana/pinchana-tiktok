@@ -249,6 +249,23 @@ class UpstreamUnavailableError(Exception):
     pass
 
 
+def _upstream_http_status(error: Exception) -> int | None:
+    """Read structured HTTP status through yt-dlp wrappers, then legacy text."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while isinstance(current, BaseException) and id(current) not in seen:
+        seen.add(id(current))
+        response = getattr(current, "response", None)
+        for status in (getattr(response, "status_code", None), getattr(current, "status", None)):
+            if isinstance(status, int) and 400 <= status < 600:
+                return status
+        match = re.search(r"(?:HTTP Error|status(?: code)?)[ :]*([45]\d{2})\b", str(current), re.I)
+        if match:
+            return int(match.group(1))
+        current = getattr(current, "cause", None) or current.__cause__
+    return None
+
+
 class TikTokRequestError(Exception):
     """Attach request-stage context while retaining the original yt-dlp error."""
 
@@ -265,12 +282,7 @@ class TikTokRequestError(Exception):
         self.cause = cause
         self.host = urlsplit(url).hostname if url else None
         self.format_id = format_id
-        status = re.search(
-            r"(?:HTTP Error|status(?: code)?)[ :]*(403|404|429)\b",
-            str(cause),
-            re.I,
-        )
-        self.status_code = int(status.group(1)) if status else None
+        self.status_code = _upstream_http_status(cause)
 
 
 MEDIA_DOWNLOAD_STAGES = {
@@ -358,6 +370,11 @@ def _classify_extraction_error(error: Exception) -> Exception:
 
     message = str(source_error)
     lowered = message.lower()
+    status = request_error.status_code if request_error else _upstream_http_status(source_error)
+    if status is not None and 500 <= status < 600:
+        return UpstreamUnavailableError(message)
+    if isinstance(source_error, httpx.TransportError):
+        return UpstreamUnavailableError(message)
     if (
         request_error
         and request_error.stage in MEDIA_DOWNLOAD_STAGES

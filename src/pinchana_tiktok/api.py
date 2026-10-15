@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import re
 import threading
@@ -27,6 +28,7 @@ DEFAULT_YDL_OPTS = {
 TT_SITE_HOSTS = {"tt.site", "www.tt.site"}
 _POST_HOSTS = {"tiktok.com", "www.tiktok.com", "m.tiktok.com"}
 _MAX_SHORT_URL_REQUESTS = 3
+logger = logging.getLogger(__name__)
 
 
 def _safe_web_url(url: str, *, https_only: bool = False) -> bool:
@@ -75,6 +77,16 @@ def _short_request_url(url: str) -> str:
     if hostname in TT_SITE_HOSTS:
         hostname = "www.tt.site"
     return parsed._replace(scheme="https", netloc=hostname, fragment="").geturl()
+
+
+def _tt_site_fallback(url: str) -> str | None:
+    parsed = urlsplit(url)
+    if (parsed.hostname or "").lower() not in TT_SITE_HOSTS:
+        return None
+    # TikTok's legacy short host accepts the same share code. Do not fetch a
+    # destination supplied by an error page or weaken redirect validation.
+    code = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    return parsed._replace(netloc="vm.tiktok.com", path=f"/{code}/").geturl()
 
 
 def request_interval_seconds() -> float:
@@ -268,6 +280,7 @@ class TikTokScraper:
 
         current = _short_request_url(url)
         visited: set[str] = set()
+        fallback_used = False
         with httpx.Client(
             follow_redirects=False,
             proxy=self._ydl.params.get("proxy"),
@@ -277,25 +290,42 @@ class TikTokScraper:
                 "Accept-Language": "en-US,en;q=0.9",
             },
         ) as client:
-            for _ in range(_MAX_SHORT_URL_REQUESTS):
+            for request_number in range(_MAX_SHORT_URL_REQUESTS):
                 if current in visited:
                     raise ExtractorError("TikTok short URL redirect loop", expected=True)
                 visited.add(current)
                 try:
                     response = client.get(current)
+                    if not response.is_redirect:
+                        response.raise_for_status()
                 except httpx.InvalidURL as exc:
                     raise ExtractorError("Invalid TikTok short URL redirect", expected=True) from exc
-                location = response.headers.get("location")
-                if not response.is_redirect:
-                    try:
-                        response.raise_for_status()
-                    except httpx.HTTPStatusError as exc:
-                        # Keep the yt-dlp-style status text understood by the
-                        # service's existing not-found / rate-limit classifier.
+                except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                    status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                    alternate = _tt_site_fallback(current)
+                    if (
+                        alternate
+                        and not fallback_used
+                        and (status is None or 500 <= status < 600)
+                        and request_number + 1 < _MAX_SHORT_URL_REQUESTS
+                    ):
+                        logger.warning(
+                            "TikTok short-link endpoint unavailable host=www.tt.site "
+                            "status=%s; falling back to vm.tiktok.com", status,
+                        )
+                        fallback_used = True
+                        current = alternate
+                        continue
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        # Preserve status metadata and the established error text
+                        # used by the service's request-time retry classifier.
                         raise ExtractorError(
-                            f"HTTP Error {response.status_code}: {response.reason_phrase}",
+                            f"HTTP Error {status}: {exc.response.reason_phrase}",
                             cause=exc,
+                            expected=True,
                         ) from exc
+                    raise
+                location = response.headers.get("location")
                 if not response.is_redirect or not location:
                     raise ExtractorError(
                         "TikTok short URL did not redirect to a post", expected=True,

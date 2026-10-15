@@ -4,7 +4,7 @@ This FastAPI module extracts supported public TikTok posts through a dedicated y
 
 ## Processing flow
 
-1. Resolve short TikTok URLs (`vm.tiktok.com`, `vt.tiktok.com`, `www.tiktok.com/t/`, and `www.tt.site/t/`) with bounded, validated HTTP redirects, without downloading the destination page. This works independently of `TIKTOK_DIRECT_WEB_PRIMARY`; bare `tt.site` links are requested through `www.tt.site`.
+1. Resolve short TikTok URLs (`vm.tiktok.com`, `vt.tiktok.com`, `www.tiktok.com/t/`, and `www.tt.site/t/`) with bounded, validated HTTP redirects, without downloading the destination page. This works independently of `TIKTOK_DIRECT_WEB_PRIMARY`; bare `tt.site` links are requested through `www.tt.site`. On a `tt.site` transport failure or HTTP 5xx, try the same code once through `vm.tiktok.com`, within the same three-request limit. HTTP 5xx failures are treated as temporary upstream outages, not extraction/parser failures.
 2. When `TIKTOK_DIRECT_WEB_PRIMARY` is enabled, extract ordinary videos from the canonical page's hydration payload in one metadata request and use its direct CDN mirrors.
 3. Use TikTok's anonymous player endpoint as the primary photo-post path and as the established video fallback; retain TikTok playback-host rewrites as a final media fallback.
 4. Reuse anonymous cookies, pace independent scrape jobs globally, and retry temporary failures within a bounded policy.
