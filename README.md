@@ -57,3 +57,8 @@ account cookies, fabricated mobile identifiers, or CAPTCHA-solving services.
 
 Live tests are opt-in. Set `PINCHANA_TIKTOK_LIVE=1` and provide the four
 `TIKTOK_LIVE_*_URL` values documented in `.env.example` before running pytest.
+
+Quiet video audio is measured and raised toward -14 LUFS using FFmpeg's
+loudness filter with a -1 dB true-peak target. The video stream is copied,
+and videos already at the target level or without audio are left unchanged.
+Set `TIKTOK_NORMALIZE_AUDIO=false` in the scraper environment to disable this.

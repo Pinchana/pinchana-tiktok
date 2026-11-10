@@ -15,6 +15,7 @@ from pinchana_core.models import ScrapeRequest, ScrapeResponse, MediaItem
 from pinchana_core.storage import MediaStorage
 from pinchana_core.plugins import ScraperPlugin, registry
 from pinchana_core.vpn import GluetunController
+from .audio import normalize_video_audio
 from .api import (
     TikTokScraper,
     is_short_tiktok_url,
@@ -39,7 +40,7 @@ storage = MediaStorage(
     base_path=os.getenv("CACHE_PATH", "./cache"),
     max_size_gb=float(os.getenv("CACHE_MAX_SIZE_GB", "10.0")),
 )
-TIKTOK_VIDEO_CACHE_VERSION = 3
+TIKTOK_VIDEO_CACHE_VERSION = 4
 
 
 class TikTokUpstreamRunner:
@@ -852,6 +853,9 @@ async def _download_and_build_response(video_id: str, info: dict, scraper: TikTo
             and str(selected_vcodec or "").lower() in {"h265", "hevc", "hvc1"}
         ):
             video_file = await _transcode_hevc_for_sharing(video_file)
+
+        if os.getenv("TIKTOK_NORMALIZE_AUDIO", "true").strip().lower() in {"1", "true", "yes", "on"}:
+            video_file = await normalize_video_audio(video_file)
 
         thumb_outtmpl = {
             "default": str(post_dir / "video.%(ext)s"),
