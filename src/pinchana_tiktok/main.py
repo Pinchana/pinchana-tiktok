@@ -92,6 +92,12 @@ def _cached_media_ready(metadata: dict) -> bool:
     if metadata.get("_tiktok_video_cache_version") != TIKTOK_VIDEO_CACHE_VERSION:
         return False
 
+    for item in [metadata, *(metadata.get("carousel") or [])]:
+        if isinstance(item, dict) and item.get("video_url"):
+            suffix = Path(str(item["video_url"]).split("?", 1)[0]).suffix.lstrip(".").lower()
+            if suffix in AUDIO_ONLY_EXTENSIONS:
+                return False
+
     urls: list[str] = []
     for key in ("thumbnail_url", "video_url", "audio_url"):
         url = metadata.get(key)
@@ -322,6 +328,14 @@ def _log_request_failure(error: Exception, *, attempt: int | None = None) -> Non
     )
 
 
+AUDIO_ONLY_EXTENSIONS = {"mp3", "m4a", "aac", "ogg", "opus", "wav", "flac"}
+
+
+def _is_video_format(format_info: dict) -> bool:
+    return (str(format_info.get("vcodec") or "").lower() != "none"
+            and str(format_info.get("ext") or "").lower() not in AUDIO_ONLY_EXTENSIONS)
+
+
 def _without_watermarked_formats(info: dict) -> dict:
     formats = info.get("formats")
     if not isinstance(formats, list):
@@ -340,7 +354,10 @@ def _without_watermarked_formats(info: dict) -> dict:
             "Discarded %d watermarked TikTok format(s)",
             len(formats) - len(clean_formats),
         )
-    return {**info, "formats": clean_formats}
+    video_formats = [item for item in clean_formats if _is_video_format(item)]
+    if not video_formats:
+        raise UpstreamUnavailableError("TikTok temporarily returned audio without a video format")
+    return {**info, "formats": video_formats}
 
 
 async def trigger_rotation():
@@ -546,7 +563,7 @@ def canonicalize_tiktok_url(url: str) -> str:
 
 
 def _ordered_video_formats(info: dict, ydl: YoutubeDL) -> list[dict]:
-    sortable_info = {**info, "formats": [dict(item) for item in info.get("formats") or []]}
+    sortable_info = {**info, "formats": [dict(item) for item in info.get("formats") or [] if _is_video_format(item)]}
     ydl.sort_formats(sortable_info)
     best_first = list(reversed(sortable_info["formats"]))
 

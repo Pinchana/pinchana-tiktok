@@ -395,3 +395,51 @@ async def test_incomplete_carousel_is_retryable_and_not_cached(monkeypatch, tmp_
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail["code"] == "media_download_failed"
     assert storage.saved is False
+
+
+def test_video_selection_excludes_audio_only_formats():
+    audio = {"format_id": "audio", "vcodec": "none", "ext": "mp3", "url": "https://cdn.example/audio.mp3"}
+    misleading = {"format_id": "audio-mp4", "vcodec": "none", "ext": "mp4", "url": "https://cdn.example/audio.mp4"}
+    video = {"format_id": "video", "vcodec": "h264", "ext": "mp4", "url": "https://cdn.example/video.mp4"}
+    info = {"formats": [audio, misleading, video]}
+    assert main._without_watermarked_formats(info)["formats"] == [video]
+    ordered = main._ordered_video_formats(info, YoutubeDL({"quiet": True, "no_warnings": True}))
+    assert [item["format_id"] for item in ordered] == ["video"]
+    with pytest.raises(main.UpstreamUnavailableError):
+        main._without_watermarked_formats({"formats": [audio, misleading]})
+
+
+def test_audio_file_mislabeled_as_video_is_not_a_cache_hit(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "storage", MediaStorage(tmp_path))
+    folder = tmp_path / "123"
+    folder.mkdir()
+    (folder / "video.mp3").write_bytes(b"audio")
+    cached = {"media_type": "video", "_tiktok_video_cache_version": main.TIKTOK_VIDEO_CACHE_VERSION,
+              "video_url": "/media/tiktok/123/video.mp3"}
+    assert not main._cached_media_ready(cached)
+
+
+@pytest.mark.asyncio
+async def test_audio_only_upstream_is_refreshed_before_video_download(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    class Scraper:
+        calls = 0
+        _ydl = YoutubeDL({"quiet": True, "no_warnings": True})
+        def extract_video(self, url):
+            Scraper.calls += 1
+            if Scraper.calls == 1:
+                return {"id": "123", "formats": [{"format_id": "audio", "vcodec": "none", "ext": "mp3", "url": "https://cdn.example/audio.mp3"}]}
+            return {"id": "123", "formats": [{"format_id": "video", "vcodec": "h264", "ext": "mp4", "url": "https://cdn.example/video.mp4"}]}
+    async def download(scraper, info, options, **kwargs):
+        assert all(row.get("vcodec") != "none" for row in info["formats"])
+        if not options.get("skip_download"):
+            (tmp_path / "123" / "video.mp4").write_bytes(b"video")
+        return info
+    monkeypatch.setattr(main, "storage", MediaStorage(tmp_path))
+    monkeypatch.setattr(main, "TikTokScraper", Scraper)
+    monkeypatch.setattr(main, "_download_with_ydl_bounded", download)
+    monkeypatch.setattr(main.asyncio, "sleep", AsyncMock())
+    response = await main._process_scrape_request(SimpleNamespace(url="https://www.tiktok.com/@creator/video/123"))
+    assert Scraper.calls == 2
+    assert response.media_type == "video"
+    assert response.video_url.endswith("video.mp4")
