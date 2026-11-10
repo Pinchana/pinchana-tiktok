@@ -338,7 +338,7 @@ async def test_watermarked_only_scrape_returns_extraction_failure(monkeypatch, t
 
 
 def test_cache_requires_current_version_and_nonempty_media(tmp_path, monkeypatch):
-    monkeypatch.setattr(main.storage, "base_path", tmp_path)
+    monkeypatch.setattr(main.storage, "_base_path", tmp_path)
     assert not main._cached_media_ready({"media_type": "video"})
     assert not main._cached_media_ready({"media_type": "carousel"})
 
